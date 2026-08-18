@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+cloudflared.exe
+cloudflared.log
+dados_upload/
+.streamlit/secrets.toml
