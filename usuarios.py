@@ -4,31 +4,37 @@ Só o time adm acessa este sistema (médico não tem acesso - decisão do usuár
 2026-08-18). 3 papéis: master (exclusivo pra ações sensíveis, ex.: disparar bônus de hospital em
 ramp-up), gestor e analista (veem tudo, não disparam ações sensíveis).
 
-Antes de usar de verdade: troque as senhas abaixo por algo só seu. Isso é uma barreira simples de
-uso interno, não é um sistema de autenticação robusto (sem hash, sem recuperação de senha, sem
-verificação de identidade) - serve pra saber quem é quem entre um grupo pequeno e confiável, não
-pra proteger contra alguém mal intencionado.
-"""
+As credenciais NÃO ficam mais neste arquivo (que vai pro GitHub) - vêm do st.secrets do
+Streamlit, configurado em .streamlit/secrets.toml (local, sempre no .gitignore) ou na tela de
+"Secrets" do Streamlit Community Cloud quando publicado. Isso permite deixar o repositório
+público sem expor nenhuma senha.
 
-USUARIOS = {
-    "luiz.amo@callmedsaude.com.br": {
-        "nome": "Luiz Amo",
-        "papel": "master",
-        "senha": "constelacao2026",  # TROCAR - senha temporaria
-    },
-    # Pendente: dados do outro gestor - Luiz vai mandar depois.
-    # "email-do-gestor@callmedsaude.com.br": {"nome": "...", "papel": "gestor", "senha": "..."},
-    # Pendente: dados do analista - Luiz vai mandar depois.
-    # "email-do-analista@callmedsaude.com.br": {"nome": "...", "papel": "analista", "senha": "..."},
-}
+Aviso de segurança: mesmo fora do código, ainda é login simples (email + senha em texto, sem
+hash, sem recuperação). Serve pra identificar quem é quem entre um grupo pequeno e confiável, não
+é proteção contra acesso mal intencionado.
+"""
+import streamlit as st
 
 PAPEIS_COM_ACAO_SENSIVEL = {"master"}  # so master dispara o bonus de ramp-up
+
+
+def _carregar_usuarios():
+    try:
+        return {email.lower(): dict(dados) for email, dados in st.secrets["usuarios"].items()}
+    except (KeyError, FileNotFoundError):
+        st.error(
+            "Nenhum usuário configurado em st.secrets['usuarios']. Crie "
+            ".streamlit/secrets.toml localmente (veja secrets.toml.exemplo) ou configure os "
+            "Secrets na tela do Streamlit Community Cloud."
+        )
+        return {}
 
 
 def autenticar(email, senha):
     """Retorna o dict do usuario se email+senha baterem, senao None."""
     email = (email or "").strip().lower()
-    user = USUARIOS.get(email)
+    usuarios = _carregar_usuarios()
+    user = usuarios.get(email)
     if user and user["senha"] == senha:
         return {"email": email, **user}
     return None
