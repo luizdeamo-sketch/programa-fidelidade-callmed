@@ -1,7 +1,13 @@
 """Caminhos de dados do Programa Fidelidade CallMed (Constelação) - sistema separado do DRE."""
 import os
 
-BASE_DESKTOP = r"C:\Users\LuizAmo\Desktop\Financeiro CallMed"
+# Pasta-base do projeto migrada do Desktop para o OneDrive em 2026-08-19 (sessao do usuario).
+# Nao usada por nenhum outro caminho deste arquivo (BASE_PLANTOES usa BASE_ONEDRIVE_ANALISES,
+# pasta separada) - mantida so por consistencia/compatibilidade.
+BASE_DESKTOP = (
+    r"C:\Users\LuizAmo\OneDrive - CALLMED SERVICOS MEDICOS E ANESTESIOLOGIA LTDA"
+    r"\Operação e Estratégia - Operações e Estratégia\Financeiro CallMed"
+)
 
 # Fonte de dados do Programa Fidelidade (indicada pelo usuario, sessao 2026-08-18) - pasta
 # separada "1.ANALISES LUIZ", MESMO PADRAO de aba "BD" da base antiga, porem com uma coluna a
