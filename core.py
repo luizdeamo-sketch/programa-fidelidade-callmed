@@ -151,7 +151,7 @@ def calcular_niveis(agg, niveis=None):
 
     'niveis' permite recalcular com parametros customizados (editados na tela de Configuracoes)
     em vez dos parametros padrao aprovados (NIVEIS) - mesmo formato de lista de dicts."""
-    niveis = niveis or NIVEIS
+    niveis = sorted(niveis or NIVEIS, key=lambda n: n["idx"])
     nivel_por_idx = niveis_para_dict(niveis)
     if agg.empty:
         return pd.DataFrame()
@@ -162,7 +162,6 @@ def calcular_niveis(agg, niveis=None):
     for medico, grp in agg.groupby("medico"):
         grp = grp.set_index("anomes")
         primeiro_idx = min(mes_para_indice[m] for m in grp.index)
-        ultimo_idx = max(mes_para_indice[m] for m in meses_todos if meses_todos.index(m) <= mes_para_indice[max(grp.index)])
         ultimo_idx = mes_para_indice[meses_todos[-1]]  # roda ate o fim da base pra todo mundo
         streaks = {2: 0, 3: 0, 4: 0}
         for i in range(primeiro_idx, ultimo_idx + 1):

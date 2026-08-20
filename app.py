@@ -23,8 +23,6 @@ import usuarios
 
 st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", layout="wide")
 
-CAMPOS_EDITAVEIS = ["min_plantoes", "max_plantoes", "min_fds", "carencia_meses", "pct_aumento"]
-
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Excel)...")
 def carregar_agregado():
@@ -207,7 +205,13 @@ with st.expander(
         st.dataframe(df_config, use_container_width=True)
 
 meses_disponiveis = sorted(niveis_df["anomes"].unique())
-if "mes_selecionado" not in st.session_state:
+# Se um upload de Excel novo mudou o intervalo de meses disponivel (ex.: arquivo mais curto), o
+# mes que estava selecionado antes pode nao existir mais na lista nova - sem esse fallback, o
+# .index() abaixo quebra o app com ValueError.
+if (
+    "mes_selecionado" not in st.session_state
+    or st.session_state["mes_selecionado"] not in meses_disponiveis
+):
     st.session_state["mes_selecionado"] = meses_disponiveis[-1]
 
 mcol1, mcol2, mcol3 = st.columns([1, 3, 1])
