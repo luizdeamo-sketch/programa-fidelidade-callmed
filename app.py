@@ -20,6 +20,7 @@ import pandas as pd
 import core
 import config_caminhos as cfg
 import usuarios
+import comunicado_pdf
 
 st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", layout="wide")
 
@@ -159,7 +160,8 @@ with st.sidebar:
     st.markdown("---")
     pagina = st.radio(
         "Navegação",
-        ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa"],
+        ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
+         "📄 Relatório do Médico"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -451,6 +453,143 @@ if pagina == "⚙️ Regras do Programa":
         st.caption(
             f"{st.session_state['rampup_pct'] * 100:.2f}% sobre o repasse, por "
             f"{st.session_state['rampup_duracao_meses']} meses (padrão configurado pelo master)."
+        )
+
+    st.stop()
+
+# ============================================================= PÁGINA: RELATÓRIO DO MÉDICO
+if pagina == "📄 Relatório do Médico":
+    st.subheader("📄 Relatório do Médico")
+    st.caption(
+        "Duas visões: **🖥️ Visão Sistema** (interna, com custo pago pela empresa e histórico "
+        "completo) e **📋 Comunicado ao Médico** (versão limpa pronta pra entregar, com botão de PDF)."
+    )
+
+    medicos_lista_rel = sorted(niveis_df["medico"].unique())
+    nome_rel = st.selectbox("Médico", [""] + medicos_lista_rel, key="relatorio_medico_nome")
+    if not nome_rel:
+        st.info("Selecione um médico para gerar o relatório.")
+        st.stop()
+
+    mes_relatorio = st.session_state["mes_atual"]
+    hist_rel = niveis_df[niveis_df["medico"] == nome_rel].sort_values("anomes")
+    if mes_relatorio in hist_rel["anomes"].values:
+        atual_rel = hist_rel[hist_rel["anomes"] == mes_relatorio].iloc[0]
+    else:
+        atual_rel = hist_rel.iloc[-1]
+        st.warning(
+            f"Sem dado em {mes_relatorio} pra esse médico — mostrando o último mês disponível "
+            f"({atual_rel['anomes']})."
+        )
+
+    nivel_vestido_rel = int(atual_rel["nivel_vestido"])
+    info_nivel_rel = core.NIVEL_POR_IDX[nivel_vestido_rel]
+    tempo_nivel_rel = core.tempo_no_nivel_atual(atual_rel)
+    prox_info_rel = core.proximo_nivel_info(atual_rel)
+    primeiro_mes_rel = hist_rel["anomes"].min()
+    # hist_rel ja tem 1 linha por mes desde o primeiro plantao do medico ate o mes mais recente da
+    # base inteira (meses sem plantao viram linha com 0, pra carencia funcionar certo - ver
+    # calcular_niveis) - entao len(hist_rel) e literalmente "quantos meses de casa", sem gap.
+    tempo_de_casa_rel = len(hist_rel)
+
+    aba_sistema, aba_medico = st.tabs(["🖥️ Visão Sistema", "📋 Comunicado ao Médico"])
+
+    # ---------------------------------------------------------- ABA SISTEMA (interna)
+    with aba_sistema:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_vestido_rel)}", unsafe_allow_html=True)
+        m2.metric("Tempo de casa", f"{tempo_de_casa_rel} mês(es)", help=f"Desde {primeiro_mes_rel}")
+        m3.metric(
+            "Tempo no nível atual",
+            f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+        )
+        m4.metric("Aumento no plantão", f"{info_nivel_rel['pct_exibido']}%")
+
+        st.markdown(f"#### Plantões em {mes_relatorio}")
+        plantoes_mes_rel = df_linhas[
+            (df_linhas["medico"] == nome_rel) & (df_linhas["anomes"] == mes_relatorio)
+        ].sort_values("data_dt")
+        if plantoes_mes_rel.empty:
+            st.caption("Nenhum plantão lançado nesse mês.")
+        else:
+            st.dataframe(
+                plantoes_mes_rel[["data_dt", "operacao", "tipo", "valor", "eh_fds", "eh_noturno",
+                                   "conta_pro_nivel"]]
+                .rename(columns={
+                    "data_dt": "Data", "operacao": "Operação", "tipo": "Tipo", "valor": "Valor",
+                    "eh_fds": "FDS", "eh_noturno": "Noturno", "conta_pro_nivel": "Contou pro nível",
+                })
+                .style.format({
+                    "Valor": fmt_brl,
+                    "Data": lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "—",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+        st.markdown("#### Bônus e custos do mês")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Valor dos plantões", fmt_brl(atual_rel["valor_repasse"]))
+        b2.metric("Valor do aumento", fmt_brl(atual_rel["custo_aumento_pct_mes"]))
+        b3.metric("Custo do seguro (empresa)", fmt_brl(atual_rel["custo_seguro_mes"]))
+        b4.metric("Total geral", fmt_brl(atual_rel["valor_total_geral"]))
+
+        with st.expander("Ver histórico completo (todos os meses)"):
+            st.dataframe(
+                hist_rel[["anomes", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto",
+                          "nivel_vestido", "valor_repasse", "valor_total_geral"]]
+                .rename(columns={
+                    "anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
+                    "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
+                    "nivel_vestido": "Nível (vigente)", "valor_repasse": "Valor Plantões",
+                    "valor_total_geral": "Total Geral",
+                })
+                .style.format({"Valor Plantões": fmt_brl, "Total Geral": fmt_brl}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ---------------------------------------------------------- ABA MÉDICO (comunicado + PDF)
+    with aba_medico:
+        st.caption(
+            "Versão pronta pra compartilhar com o médico — sem os custos internos pagos pela empresa."
+        )
+        st.markdown(
+            f"### Nível {nivel_vestido_rel} — {info_nivel_rel['pct_exibido']}% de aumento no plantão"
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Plantões no mês", int(atual_rel["n_plantoes"]))
+        c2.metric("FDS/Noturno", int(atual_rel["n_fds_ou_noturno"]))
+        c3.metric(
+            "Tempo no nível", f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+        )
+
+        st.markdown("##### Benefícios inclusos")
+        for beneficio in core.beneficios_acumulados(nivel_vestido_rel):
+            st.markdown(f"- {beneficio}")
+
+        if prox_info_rel:
+            partes_rel = []
+            if prox_info_rel["faltam_plantoes"] > 0:
+                partes_rel.append(f"{prox_info_rel['faltam_plantoes']} plantão(ões)")
+            if prox_info_rel["faltam_fds_ou_noturno"] > 0:
+                partes_rel.append(f"{prox_info_rel['faltam_fds_ou_noturno']} plantão(ões) de FDS/noturno")
+            if partes_rel:
+                st.info(f"Faltam {' e '.join(partes_rel)} no mês pro {prox_info_rel['proximo_nivel']}.")
+            else:
+                st.info(
+                    f"O volume deste mês já sustenta o {prox_info_rel['proximo_nivel']} — o "
+                    "benefício passa a valer após a carência, se mantido nos próximos meses."
+                )
+
+        pdf_bytes_rel = comunicado_pdf.gerar_pdf_comunicado(
+            nome_medico=nome_rel, mes_ref=mes_relatorio, nivel_vestido=nivel_vestido_rel,
+            n_plantoes=int(atual_rel["n_plantoes"]), n_fds=int(atual_rel["n_fds"]),
+            n_noturno=int(atual_rel["n_noturno"]), pct_aumento_exibido=info_nivel_rel["pct_exibido"],
+            tempo_no_nivel=tempo_nivel_rel, proximo_nivel_info=prox_info_rel,
+        )
+        st.download_button(
+            "📄 Baixar PDF para o médico", data=pdf_bytes_rel,
+            file_name=f"comunicado_{nome_rel.replace(' ', '_')}_{mes_relatorio}.pdf",
+            mime="application/pdf", type="primary",
         )
 
     st.stop()

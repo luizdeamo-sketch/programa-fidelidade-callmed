@@ -410,11 +410,71 @@ def status_atual(niveis_df, anomes_referencia=None):
 
 def proximo_nivel_info(row):
     """Dado um snapshot-row de status_atual, calcula quanto falta pro proximo nivel (por
-    volume - carencia adicional continua sendo tempo, nao da pra "comprar")."""
+    volume - carencia adicional continua sendo tempo, nao da pra "comprar"). Usa n_fds_ou_noturno
+    (a uniao, mesmo campo que _nivel_bruto usa de verdade) - corrigido em 2026-08-20, a versao
+    anterior comparava com n_fds puro e ficava incoerente com a regra vigente. Sem uso em nenhuma
+    tela ate essa correcao (funcao morta), entao nao ha call-site desatualizado pra ajustar."""
     nivel_atual = row["nivel_bruto"]
     if nivel_atual >= 4:
         return None
     prox = NIVEL_POR_IDX[nivel_atual + 1]
     faltam_plantoes = max(0, prox["min_plantoes"] - row["n_plantoes"])
-    faltam_fds = max(0, prox["min_fds"] - row["n_fds"])
-    return {"proximo_nivel": prox["nome"], "faltam_plantoes": faltam_plantoes, "faltam_fds": faltam_fds}
+    faltam_fds_ou_noturno = max(0, prox["min_fds"] - row["n_fds_ou_noturno"])
+    return {
+        "proximo_nivel": prox["nome"], "faltam_plantoes": faltam_plantoes,
+        "faltam_fds_ou_noturno": faltam_fds_ou_noturno,
+    }
+
+
+# Beneficios por nivel (Programa_Constelacao_CallMed_v2.md secao 2) - cada nivel soma aos
+# anteriores (Nivel 3 tem tudo do 1+2+3). Usado no "Relatorio do Medico" (tela + PDF pra entregar
+# ao medico) - texto em tom de comunicado, nao o tom tecnico do documento de regras.
+BENEFICIOS_NIVEL = {
+    1: [
+        "Suporte administrativo prioritário",
+        "Apoio jurídico integral (retroatividade de 3 anos para fatos desconhecidos)",
+        "Convênio médico básico",
+        "Antecipação de valores de plantão (pago até 2 dias após o plantão)",
+    ],
+    2: [
+        "Desconto em planos de saúde",
+        "Antecipação dos plantões agendados",
+        "Acesso ao programa de mindfulness",
+    ],
+    3: [
+        "50% de reembolso em cursos (ACLS/PALS/COPA/SAVA, 1x/ano, até 3 localidades indicadas)",
+        "Escala preferencial em unidades",
+        "Seguro de Vida — R$ 99.000 (morte natural) / R$ 198.000 (morte acidental)",
+        "DIT — R$ 166,66/dia em caso de incapacidade temporária",
+        "Assistência Funeral Familiar — R$ 10.000",
+        "RCP — Responsabilidade Civil Profissional, R$ 100.000, franquia zero",
+    ],
+    4: [
+        "100% de reembolso em cursos",
+        "15 dias de licença maternidade remunerada",
+        "7 dias de licença paternidade remunerada",
+        "Reconhecimento oficial em eventos CallMed",
+    ],
+}
+
+
+def beneficios_acumulados(nivel):
+    """Lista cumulativa de beneficios do Nivel 1 ate o nivel informado (cada nivel inclui tudo
+    dos anteriores + os proprios)."""
+    beneficios = []
+    for n in range(1, int(nivel) + 1):
+        beneficios.extend(BENEFICIOS_NIVEL.get(n, []))
+    return beneficios
+
+
+def tempo_no_nivel_atual(row, niveis=None):
+    """Quantos meses o BENEFICIO do nivel vigente esta realmente ativo (streak do nivel menos a
+    carencia que ja foi cumprida pra ele valer) - diferente do streak bruto, que conta tambem os
+    meses "gastos" na propria carencia. Nivel 1 nao tem streak/carencia (e o piso), retorna None."""
+    niveis = niveis or NIVEIS
+    nivel_vestido = int(row["nivel_vestido"])
+    if nivel_vestido < 2:
+        return None
+    carencia = niveis_para_dict(niveis)[nivel_vestido]["carencia_meses"]
+    streak = int(row.get(f"streak_n{nivel_vestido}", 0))
+    return max(1, streak - carencia)
