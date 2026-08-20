@@ -160,11 +160,13 @@ def gerar_pdf_comunicado(
             p["data"], Paragraph(str(p["operacao"]), cel_style), Paragraph(str(p["tipo"]), cel_style),
             _fmt_brl(p["valor"]),
         ])
+    valor_total_geral = valor_total_plantoes + valor_bonificacao
     linhas_pl.append(["Total de plantões", "", "", _fmt_brl(valor_total_plantoes)])
     linhas_pl.append([
         f"Bonificação Nível {int(nivel_vestido)} ({pct_aumento_exibido}% sobre o total acima)",
         "", "", _fmt_brl(valor_bonificacao),
     ])
+    linhas_pl.append(["Total geral (plantões + bonificação)", "", "", _fmt_brl(valor_total_geral)])
 
     tabela_pl = Table(
         linhas_pl, colWidths=[2.3 * cm, 6.4 * cm, 4.2 * cm, 2.5 * cm], repeatRows=1,
@@ -178,12 +180,21 @@ def gerar_pdf_comunicado(
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
         ("LINEBELOW", (0, 0), (-1, 0), 0.75, cor_texto),
+        ("SPAN", (0, -3), (2, -3)),
         ("SPAN", (0, -2), (2, -2)),
         ("SPAN", (0, -1), (2, -1)),
+        ("ALIGN", (0, -3), (2, -3), "RIGHT"),
         ("ALIGN", (0, -2), (2, -2), "RIGHT"),
         ("ALIGN", (0, -1), (2, -1), "RIGHT"),
-        ("FONTNAME", (0, -2), (-1, -1), "Helvetica-Bold"),
-        ("LINEABOVE", (0, -2), (-1, -2), 0.75, cor_texto),
+        ("FONTNAME", (0, -3), (-1, -1), "Helvetica-Bold"),
+        ("LINEABOVE", (0, -3), (-1, -3), 0.75, cor_texto),
+        # Total geral (plantões + bonificação) - linha final em destaque, pedido do usuário
+        # (2026-08-20) pra deixar claro o quanto o médico recebe no total, não só a bonificação.
+        ("LINEABOVE", (0, -1), (-1, -1), 1, cor_texto),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#EFF6FF")),
+        ("FONTSIZE", (0, -1), (-1, -1), 10.5),
+        ("TOPPADDING", (0, -1), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, -1), (-1, -1), 7),
     ]))
     story.append(tabela_pl)
     story.append(Spacer(1, 4))
