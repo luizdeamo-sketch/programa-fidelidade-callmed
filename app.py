@@ -1098,17 +1098,47 @@ for n, col in zip((1, 2, 3, 4), (c2, c3, c4, c5)):
 
 st.markdown("#### Custo mensal projetado")
 st.caption(
-    "Aumento % no repasse já reflete o nível de pagamento (por volume, sem carência). Seguros só "
-    "contam pros médicos que já cumpriram a carência do Nível 3+ (nível de benefícios) - ver "
-    "coluna 'Faltam p/ próximo nível' na tabela abaixo pra quem ainda está no período de carência."
+    "Aumento % no repasse já reflete o nível de pagamento (por volume, sem carência). "
+    "Custo de seguro não entra aqui — ver a lista de elegíveis logo abaixo."
 )
-cc1, cc2, cc3, cc4 = st.columns(4)
-cc1.metric("Seguros (N3+, benefícios liberados)", fmt_brl(snap["custo_seguro_mes"].sum()))
-cc2.metric("Aumento % no repasse (pagamento)", fmt_brl(snap["custo_aumento_pct_mes"].sum()))
-cc3.metric("Bônus ramp-up ativo", fmt_brl(snap["custo_rampup_mes"].sum()))
-cc4.metric("Total", fmt_brl(
-    snap["custo_seguro_mes"].sum() + snap["custo_aumento_pct_mes"].sum() + snap["custo_rampup_mes"].sum()
-))
+cc1, cc2, cc3 = st.columns(3)
+cc1.metric("Aumento % no repasse (pagamento)", fmt_brl(snap["custo_aumento_pct_mes"].sum()))
+cc2.metric("Bônus ramp-up ativo", fmt_brl(snap["custo_rampup_mes"].sum()))
+cc3.metric("Total", fmt_brl(snap["custo_aumento_pct_mes"].sum() + snap["custo_rampup_mes"].sum()))
+
+# ------------------------------------------------------- MÉDICOS COM DIREITO AO SEGURO (N3+)
+# Pedido do usuário (2026-08-20): tirar o CUSTO do seguro dessa tela (não faz sentido mostrar
+# valor aqui) e, em vez disso, dar uma lista pronta de quem tem direito - pra mandar pra
+# seguradora atualizar a apólice. "Direito" = nivel_vestido >= 3 (carência do Nível 3+ já
+# cumprida, não só o volume bruto do mês - ver core.calcular_niveis).
+elegiveis_seguro = snap[snap["nivel_vestido"] >= 3].copy()
+with st.expander(f"🛡️ Médicos com direito ao seguro (Nível 3+) — {len(elegiveis_seguro)} médico(s)"):
+    st.caption(
+        "Lista pronta pra mandar pra seguradora: médicos que já cumpriram a carência do Nível 3+ "
+        "(benefícios liberados), não só quem tem volume suficiente no mês."
+    )
+    if elegiveis_seguro.empty:
+        st.info("Nenhum médico com benefícios de Nível 3+ liberados neste mês ainda.")
+    else:
+        elegiveis_seguro["tempo_beneficio_meses"] = elegiveis_seguro.apply(
+            core.tempo_no_nivel_atual, axis=1
+        )
+        especialidades_seguro = []
+        for medico_seg in elegiveis_seguro["medico"]:
+            esp_seg = df_linhas.loc[df_linhas["medico"] == medico_seg, "especialidade"]
+            esp_seg = esp_seg[esp_seg != ""]
+            moda_seg = esp_seg.mode()
+            especialidades_seguro.append(moda_seg.iat[0] if not moda_seg.empty else "—")
+        elegiveis_seguro["especialidade"] = especialidades_seguro
+        st.dataframe(
+            elegiveis_seguro[["medico", "especialidade", "nivel_vestido", "tempo_beneficio_meses"]]
+            .sort_values(["nivel_vestido", "medico"], ascending=[False, True])
+            .rename(columns={
+                "medico": "Médico", "especialidade": "Especialidade", "nivel_vestido": "Nível",
+                "tempo_beneficio_meses": "Meses c/ benefício ativo",
+            }),
+            use_container_width=True, hide_index=True,
+        )
 
 st.markdown("---")
 st.markdown("#### Tabela de médicos")
