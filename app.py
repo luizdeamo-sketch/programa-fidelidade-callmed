@@ -98,6 +98,42 @@ def badge_nivel(n):
     return f'<span style="background:{cores.get(n,"#999")};color:#111;padding:2px 10px;border-radius:12px;font-weight:600;">Nível {n}</span>'
 
 
+def renderizar_simulacao_niveis(row):
+    """Bloco 'Simulação — quanto falta pra cada nível acima' (pedido do usuário 2026-08-20,
+    depois pedido de novo pra aparecer também ao selecionar o médico na Tabela de médicos da
+    Visão Geral - mesmo dia). Compartilhado entre renderizar_relatorio_medico (aba Visão Sistema)
+    e a Consulta por médico, pra não duplicar a lógica de exibição - mesmo padrão do resto do
+    arquivo (função compartilhada em vez de copiar/colar)."""
+    sim_niveis = core.simular_todos_niveis(row)
+    st.markdown("**Simulação — quanto falta pra cada nível acima**")
+    if not sim_niveis:
+        st.success("Já está no Nível 4 — nível máximo do programa.")
+        return
+    for sim in sim_niveis:
+        partes_sim = []
+        if sim["faltam_plantoes"] > 0:
+            partes_sim.append(f"{sim['faltam_plantoes']} plantão(ões)")
+        if sim["faltam_fds_ou_noturno"] > 0:
+            partes_sim.append(f"{sim['faltam_fds_ou_noturno']} de FDS/noturno")
+        texto_falta = (
+            f"faltam **{' e '.join(partes_sim)}** este mês" if partes_sim
+            else "**já sustentado** pelo volume deste mês (aguardando carência)"
+        )
+        complemento_valor = (
+            f" — cerca de **{fmt_brl_md(sim['ganho_extra_estimado'])} a mais** de bonificação"
+            if sim["ganho_extra_estimado"] > 0 else ""
+        )
+        st.markdown(
+            f"{badge_nivel(sim['nivel_idx'])} &nbsp; ({sim['pct_exibido']}% de aumento) — "
+            f"{texto_falta}{complemento_valor}.",
+            unsafe_allow_html=True,
+        )
+    st.caption(
+        "Estimativa de ganho com base no ticket médio dos plantões já feitos neste mês — pode "
+        "variar conforme o valor real dos próximos plantões."
+    )
+
+
 def renderizar_relatorio_medico(nome_medico, mes_referencia):
     """Conteúdo completo do relatório de um médico (abas 🖥️ Visão Sistema + 📋 Comunicado, com
     botão de PDF) - função compartilhada entre a página dedicada '📄 Relatório do Médico' e o
@@ -172,6 +208,9 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
         )
         m4.metric("Aumento no plantão", f"{info_nivel_rel['pct_exibido']}%")
+
+        st.markdown("---")
+        renderizar_simulacao_niveis(atual_rel)
 
         st.markdown(f"#### Plantões em {mes_referencia}")
         plantoes_mes_rel = df_linhas[
@@ -1016,38 +1055,9 @@ if nome:
             f"Hoje está com o **Nível {atual['nivel_vestido']}** ativo."
         )
 
-    # ------------------------------------------------------- SIMULAÇÃO: FALTAM QUANTOS PRO PRÓXIMO?
-    # Pedido do usuário (2026-08-20): pro escalista poder avisar o médico "faltam X plantões pro
-    # Nível 3, mais Y pro Nível 4" com o valor estimado do lado, direto na consulta - não só no
-    # relatório/PDF final. Usa o mesmo ticket médio do mês (core.simular_todos_niveis).
-    sim_niveis = core.simular_todos_niveis(atual)
-    st.markdown("**Simulação — quanto falta pra cada nível acima**")
-    if sim_niveis:
-        for sim in sim_niveis:
-            partes_sim = []
-            if sim["faltam_plantoes"] > 0:
-                partes_sim.append(f"{sim['faltam_plantoes']} plantão(ões)")
-            if sim["faltam_fds_ou_noturno"] > 0:
-                partes_sim.append(f"{sim['faltam_fds_ou_noturno']} de FDS/noturno")
-            texto_falta = (
-                f"faltam **{' e '.join(partes_sim)}** este mês" if partes_sim
-                else "**já sustentado** pelo volume deste mês (aguardando carência)"
-            )
-            complemento_valor = (
-                f" — cerca de **{fmt_brl_md(sim['ganho_extra_estimado'])} a mais** de bonificação"
-                if sim["ganho_extra_estimado"] > 0 else ""
-            )
-            st.markdown(
-                f"{badge_nivel(sim['nivel_idx'])} &nbsp; ({sim['pct_exibido']}% de aumento) — "
-                f"{texto_falta}{complemento_valor}.",
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Estimativa de ganho com base no ticket médio dos plantões já feitos neste mês — pode "
-            "variar conforme o valor real dos próximos plantões."
-        )
-    else:
-        st.success("Já está no Nível 4 — nível máximo do programa.")
+    # Simulação "quanto falta pra cada nível acima" (pedido do usuário, 2026-08-20) - função
+    # compartilhada com renderizar_relatorio_medico, ver renderizar_simulacao_niveis().
+    renderizar_simulacao_niveis(atual)
 
     with st.expander("Ver histórico completo"):
         st.dataframe(
