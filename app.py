@@ -40,11 +40,14 @@ def agregar_com_operacoes(df_linhas, operacoes_excluidas_tuple):
 
 
 @st.cache_data(ttl=3600, show_spinner="Recalculando níveis com os parâmetros atuais...")
-def calcular_niveis_cached(agg, niveis_json, medicos_gestores_tuple):
-    """Cacheado pelo JSON dos parametros + tupla de gestores manuais - so recalcula de fato
-    quando um dos dois muda."""
+def calcular_niveis_cached(agg, niveis_json, medicos_gestores_tuple, custo_seguro_total):
+    """Cacheado pelo JSON dos parametros + tupla de gestores manuais + custo do seguro - so
+    recalcula de fato quando algum dos tres muda."""
     niveis = json.loads(niveis_json)
-    return core.calcular_niveis(agg, niveis=niveis, medicos_gestores=set(medicos_gestores_tuple))
+    return core.calcular_niveis(
+        agg, niveis=niveis, medicos_gestores=set(medicos_gestores_tuple),
+        custo_seguro_mes=custo_seguro_total,
+    )
 
 
 def niveis_para_json(niveis):
@@ -88,11 +91,20 @@ if "operacoes_excluidas" not in st.session_state:
     st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
 if "medicos_gestores" not in st.session_state:
     st.session_state["medicos_gestores"] = set()
+if "custo_seguro_vida_dit_funeral" not in st.session_state:
+    st.session_state["custo_seguro_vida_dit_funeral"] = core.CUSTO_SEGURO_VIDA_DIT_FUNERAL
+if "custo_seguro_rcp" not in st.session_state:
+    st.session_state["custo_seguro_rcp"] = core.CUSTO_RCP
+if "rampup_pct" not in st.session_state:
+    st.session_state["rampup_pct"] = 0.05
+if "rampup_duracao_meses" not in st.session_state:
+    st.session_state["rampup_duracao_meses"] = 3
 
 agg = agregar_com_operacoes(df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])))
 niveis_df = calcular_niveis_cached(
     agg, niveis_para_json(st.session_state["niveis_custom"]),
     tuple(sorted(st.session_state["medicos_gestores"])),
+    st.session_state["custo_seguro_vida_dit_funeral"] + st.session_state["custo_seguro_rcp"],
 )
 if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")
@@ -121,6 +133,23 @@ def _ir_mes(delta):
         st.session_state["mes_atual"] = meses_disponiveis[novo_idx]
 
 
+# Callbacks dos botoes "Restaurar padrao" da tela Regras do Programa (seguro e ramp-up) - tem que
+# rodar via on_click, nao dentro de "if st.button():", pelo mesmo motivo do _ir_mes acima: os
+# widgets desses campos usam a MESMA key da variavel de session_state (pra "Restaurar padrao"
+# tambem resetar o valor exibido, nao so o numero usado no calculo), entao ja estao instanciados
+# quando o "if button" seria avaliado nesse mesmo run.
+def _restaurar_seguro():
+    st.session_state["custo_seguro_vida_dit_funeral"] = core.CUSTO_SEGURO_VIDA_DIT_FUNERAL
+    st.session_state["custo_seguro_rcp"] = core.CUSTO_RCP
+
+
+def _restaurar_rampup():
+    st.session_state["input_rampup_pct"] = 5.0
+    st.session_state["input_rampup_duracao"] = 3
+    st.session_state["rampup_pct"] = 0.05
+    st.session_state["rampup_duracao_meses"] = 3
+
+
 with st.sidebar:
     st.markdown(f"**{usuario['nome']}**")
     st.caption(f"Papel: {usuario['papel']}")
@@ -129,7 +158,9 @@ with st.sidebar:
         st.rerun()
     st.markdown("---")
     pagina = st.radio(
-        "Navegação", ["📊 Visão Geral", "🏥 Operações", "👔 Gestores"], label_visibility="collapsed"
+        "Navegação",
+        ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa"],
+        label_visibility="collapsed",
     )
     st.markdown("---")
 
@@ -170,88 +201,6 @@ with st.sidebar:
                     st.rerun()
         else:
             st.caption("Envio de novo arquivo é exclusivo do papel master.")
-
-    # ---------------------------------------------------------- CONFIGURAÇÕES DO PROGRAMA
-    _tem_mensagem_pendente = st.session_state.get("sucesso_config", False)
-    with st.expander(
-        "⚙️ Configurações do programa (níveis, carência, % de aumento)",
-        expanded=_tem_mensagem_pendente,
-    ):
-        if not eh_master:
-            st.caption("Somente leitura — edição é exclusiva do papel master.")
-
-        if st.session_state.pop("sucesso_config", False):
-            st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
-        if st.session_state.pop("avisos_config", None):
-            for a in st.session_state.get("_avisos_pendentes", []):
-                st.warning(a)
-            st.caption("Mesmo assim, os parâmetros foram salvos e recalculados — ajuste os limites se não era essa a intenção.")
-
-        linhas_config = []
-        for n in st.session_state["niveis_custom"]:
-            linhas_config.append({
-                "Nível": n["idx"],
-                "Mín. plantões": n["min_plantoes"],
-                "Máx. plantões (vazio = sem limite)": n["max_plantoes"],
-                "Mín. FDS+Noturno": n["min_fds"],
-                "Carência (meses)": n["carencia_meses"],
-                "% aumento no plantão": round(n["pct_aumento"] * 100, 2),
-            })
-        df_config = pd.DataFrame(linhas_config).set_index("Nível")
-
-        if eh_master:
-            df_editado = st.data_editor(
-                df_config, use_container_width=True, key="editor_niveis",
-                column_config={
-                    "Máx. plantões (vazio = sem limite)": st.column_config.NumberColumn(
-                        help="Deixe vazio no Nível 4 para representar '20 ou mais, sem teto'."
-                    ),
-                    "% aumento no plantão": st.column_config.NumberColumn(
-                        help="Em %, ex.: 2.75 para 2,75%", format="%.2f",
-                    ),
-                },
-            )
-            cbtn1, cbtn2 = st.columns(2)
-            if cbtn1.button("✅ Aplicar", type="primary"):
-                novos_niveis = []
-                for idx, row in df_editado.iterrows():
-                    maximo = row["Máx. plantões (vazio = sem limite)"]
-                    novos_niveis.append({
-                        "idx": int(idx),
-                        "nome": f"Nível {int(idx)}",
-                        "min_plantoes": int(row["Mín. plantões"]),
-                        "max_plantoes": None if pd.isna(maximo) else int(maximo),
-                        "min_fds": int(row["Mín. FDS+Noturno"]),
-                        "carencia_meses": int(row["Carência (meses)"]),
-                        "pct_aumento": float(row["% aumento no plantão"]) / 100,
-                        "pct_exibido": round(float(row["% aumento no plantão"])),
-                        "tem_seguro": int(idx) >= 3,
-                    })
-                novos_niveis.sort(key=lambda n: n["idx"])
-                avisos = []
-                for i in range(len(novos_niveis) - 1):
-                    atual, prox = novos_niveis[i], novos_niveis[i + 1]
-                    maximo_atual = atual["max_plantoes"]
-                    if maximo_atual is None or maximo_atual + 1 != prox["min_plantoes"]:
-                        avisos.append(
-                            f"Entre Nível {atual['idx']} (máx. {maximo_atual}) e Nível {prox['idx']} "
-                            f"(mín. {prox['min_plantoes']}) há uma lacuna ou sobreposição — médicos "
-                            f"nesse intervalo vão cair no Nível 1 por padrão, sem aviso."
-                        )
-                st.session_state["_avisos_pendentes"] = avisos
-                st.session_state["avisos_config"] = bool(avisos)
-                st.session_state["sucesso_config"] = True
-                st.session_state["niveis_custom"] = novos_niveis
-                st.rerun()
-            if cbtn2.button("↩️ Restaurar padrão"):
-                st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
-                st.rerun()
-            st.caption(
-                "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta "
-                "carência e, portanto, todos os meses navegáveis, não só o mês selecionado)."
-            )
-        else:
-            st.dataframe(df_config, use_container_width=True)
 
 st.title("⭐ Programa Fidelidade CallMed — Constelação")
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
@@ -330,6 +279,171 @@ if pagina == "👔 Gestores":
         st.dataframe(
             pd.DataFrame({"Médico": sorted(st.session_state["medicos_gestores"])}),
             use_container_width=True, hide_index=True,
+        )
+
+    st.stop()
+
+# ============================================================= PÁGINA: REGRAS DO PROGRAMA
+if pagina == "⚙️ Regras do Programa":
+    st.subheader("⚙️ Regras do Programa")
+    st.caption(
+        "Qualquer mudança aqui recalcula o histórico inteiro na hora — reflete direto no "
+        "resultado das outras telas, para todo mundo que estiver usando o sistema."
+    )
+    if not eh_master:
+        st.warning("Somente leitura — edição é exclusiva do papel master.")
+
+    # ---------------------------------------------------------- NÍVEIS, CARÊNCIA, % AUMENTO
+    st.markdown("#### Níveis, carência e % de aumento no plantão")
+    if st.session_state.pop("sucesso_config", False):
+        st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
+    if st.session_state.pop("avisos_config", None):
+        for a in st.session_state.get("_avisos_pendentes", []):
+            st.warning(a)
+        st.caption("Mesmo assim, os parâmetros foram salvos e recalculados — ajuste os limites se não era essa a intenção.")
+
+    linhas_config = []
+    for n in st.session_state["niveis_custom"]:
+        linhas_config.append({
+            "Nível": n["idx"],
+            "Mín. plantões": n["min_plantoes"],
+            "Máx. plantões (vazio = sem limite)": n["max_plantoes"],
+            "Mín. FDS+Noturno": n["min_fds"],
+            "Carência (meses)": n["carencia_meses"],
+            "% aumento no plantão": round(n["pct_aumento"] * 100, 2),
+        })
+    df_config = pd.DataFrame(linhas_config).set_index("Nível")
+
+    if eh_master:
+        df_editado = st.data_editor(
+            df_config, use_container_width=True, key="editor_niveis",
+            column_config={
+                "Máx. plantões (vazio = sem limite)": st.column_config.NumberColumn(
+                    help="Deixe vazio no Nível 4 para representar '20 ou mais, sem teto'."
+                ),
+                "% aumento no plantão": st.column_config.NumberColumn(
+                    help="Em %, ex.: 2.75 para 2,75%", format="%.2f",
+                ),
+            },
+        )
+        cbtn1, cbtn2 = st.columns(2)
+        if cbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_niveis"):
+            novos_niveis = []
+            for idx, row in df_editado.iterrows():
+                maximo = row["Máx. plantões (vazio = sem limite)"]
+                novos_niveis.append({
+                    "idx": int(idx),
+                    "nome": f"Nível {int(idx)}",
+                    "min_plantoes": int(row["Mín. plantões"]),
+                    "max_plantoes": None if pd.isna(maximo) else int(maximo),
+                    "min_fds": int(row["Mín. FDS+Noturno"]),
+                    "carencia_meses": int(row["Carência (meses)"]),
+                    "pct_aumento": float(row["% aumento no plantão"]) / 100,
+                    "pct_exibido": round(float(row["% aumento no plantão"])),
+                    "tem_seguro": int(idx) >= 3,
+                })
+            novos_niveis.sort(key=lambda n: n["idx"])
+            avisos = []
+            for i in range(len(novos_niveis) - 1):
+                atual, prox = novos_niveis[i], novos_niveis[i + 1]
+                maximo_atual = atual["max_plantoes"]
+                if maximo_atual is None or maximo_atual + 1 != prox["min_plantoes"]:
+                    avisos.append(
+                        f"Entre Nível {atual['idx']} (máx. {maximo_atual}) e Nível {prox['idx']} "
+                        f"(mín. {prox['min_plantoes']}) há uma lacuna ou sobreposição — médicos "
+                        f"nesse intervalo vão cair no Nível 1 por padrão, sem aviso."
+                    )
+            st.session_state["_avisos_pendentes"] = avisos
+            st.session_state["avisos_config"] = bool(avisos)
+            st.session_state["sucesso_config"] = True
+            st.session_state["niveis_custom"] = novos_niveis
+            st.rerun()
+        if cbtn2.button("↩️ Restaurar padrão", key="btn_restaurar_niveis"):
+            st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
+            st.rerun()
+        st.caption(
+            "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta "
+            "carência e, portanto, todos os meses navegáveis, não só o mês selecionado)."
+        )
+    else:
+        st.dataframe(df_config, use_container_width=True)
+
+    # ---------------------------------------------------------- SEGUROS (N3+)
+    st.markdown("---")
+    st.markdown("#### Pacote de seguros (a partir do Nível 3)")
+    if st.session_state.pop("sucesso_seguro", False):
+        st.success("Custo do seguro aplicado — histórico recalculado.")
+
+    if eh_master:
+        # Key do widget = mesmo nome da variavel de session_state (igual ao fix do "mes_atual") -
+        # assim "Restaurar padrao" via on_click reseta o VALOR EXIBIDO tambem, nao so o numero
+        # usado no calculo. Passar value= de novo nesses widgets nao adianta depois do primeiro
+        # render (Streamlit ignora e mantem o que ja esta em session_state[key]).
+        sc1, sc2 = st.columns(2)
+        sc1.number_input(
+            "Vida + DIT + Funeral (Porto Seguro), R$/médico/mês",
+            min_value=0.0, step=1.0, format="%.2f", key="custo_seguro_vida_dit_funeral",
+        )
+        sc2.number_input(
+            "RCP (Unimed Seguros), R$/médico/mês",
+            min_value=0.0, step=1.0, format="%.2f", key="custo_seguro_rcp",
+        )
+        st.caption(
+            f"Total atual: {fmt_brl(st.session_state['custo_seguro_vida_dit_funeral'] + st.session_state['custo_seguro_rcp'])}"
+            f"/médico/mês (cobrado de todo médico Nível 3+)."
+        )
+        sbtn1, sbtn2 = st.columns(2)
+        if sbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_seguro"):
+            st.session_state["sucesso_seguro"] = True
+            st.rerun()
+        sbtn2.button("↩️ Restaurar padrão", key="btn_restaurar_seguro", on_click=_restaurar_seguro)
+    else:
+        st.metric(
+            "Total por médico/mês",
+            fmt_brl(st.session_state["custo_seguro_vida_dit_funeral"] + st.session_state["custo_seguro_rcp"]),
+        )
+
+    # ---------------------------------------------------------- BÔNUS RAMP-UP
+    st.markdown("---")
+    st.markdown("#### Bônus hospital em ramp-up")
+    if st.session_state.pop("sucesso_rampup", False):
+        st.success("Parâmetros do bônus de ramp-up aplicados.")
+
+    # "input_rampup_pct" guarda o % em unidade de exibicao (0-100), separado de "rampup_pct" (0-1,
+    # usado direto no calculo do bonus) - por isso precisa de conversao no Aplicar, diferente do
+    # seguro acima (mesma unidade nos dois lados).
+    if "input_rampup_pct" not in st.session_state:
+        st.session_state["input_rampup_pct"] = st.session_state["rampup_pct"] * 100
+    if "input_rampup_duracao" not in st.session_state:
+        st.session_state["input_rampup_duracao"] = st.session_state["rampup_duracao_meses"]
+
+    if eh_master:
+        rc1, rc2 = st.columns(2)
+        rc1.number_input(
+            "% fixo sobre o repasse do médico", min_value=0.0, max_value=100.0,
+            step=0.5, format="%.2f", key="input_rampup_pct",
+        )
+        rc2.number_input(
+            "Duração padrão (meses)", min_value=1, max_value=12,
+            step=1, key="input_rampup_duracao",
+        )
+        st.caption(
+            "O gatilho continua manual (tela Visão Geral, exclusivo do master) — isso só define "
+            "o % e a duração padrão sugeridos quando o bônus for disparado."
+        )
+        rbtn1, rbtn2 = st.columns(2)
+        if rbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_rampup"):
+            st.session_state["rampup_pct"] = st.session_state["input_rampup_pct"] / 100
+            st.session_state["rampup_duracao_meses"] = int(st.session_state["input_rampup_duracao"])
+            st.session_state["sucesso_rampup"] = True
+            st.rerun()
+        rbtn2.button(
+            "↩️ Restaurar padrão (5%, 3 meses)", key="btn_restaurar_rampup", on_click=_restaurar_rampup
+        )
+    else:
+        st.caption(
+            f"{st.session_state['rampup_pct'] * 100:.2f}% sobre o repasse, por "
+            f"{st.session_state['rampup_duracao_meses']} meses (padrão configurado pelo master)."
         )
 
     st.stop()
@@ -428,8 +542,11 @@ if nome:
 # ---------------------------------------------------------------- RAMP-UP (SÓ MASTER)
 st.markdown("---")
 st.markdown("#### 🚀 Bônus hospital em ramp-up")
+rampup_pct = st.session_state["rampup_pct"]
+rampup_duracao = st.session_state["rampup_duracao_meses"]
 st.caption(
-    "Gatilho manual — 5% fixo sobre o repasse do período, por 3 meses a partir do disparo."
+    f"Gatilho manual — {rampup_pct * 100:.2f}% fixo sobre o repasse do período, por "
+    f"{rampup_duracao} meses a partir do disparo (ajustável em ⚙️ Regras do Programa)."
 )
 if not eh_master:
     st.warning(
@@ -442,16 +559,19 @@ hosp_sel = st.selectbox("Hospital/operação em ramp-up", [""] + hospitais_dispo
 if hosp_sel:
     janela = df_linhas[df_linhas["operacao"] == hosp_sel]
     meses_disp = sorted(janela["anomes"].unique(), reverse=True)[:6]
-    meses_sel = st.multiselect("Meses do ramp-up (normalmente 3 meses seguidos)", meses_disp, default=meses_disp[:3])
+    meses_sel = st.multiselect(
+        f"Meses do ramp-up (padrão: {rampup_duracao} meses seguidos)",
+        meses_disp, default=meses_disp[:rampup_duracao],
+    )
     if meses_sel:
         repasse_periodo = janela[janela["anomes"].isin(meses_sel)]["valor"].sum()
-        st.metric(f"Bônus de 5% sobre o repasse ({hosp_sel}, {len(meses_sel)} meses)",
-                  fmt_brl(repasse_periodo * 0.05))
+        st.metric(f"Bônus de {rampup_pct * 100:.2f}% sobre o repasse ({hosp_sel}, {len(meses_sel)} meses)",
+                  fmt_brl(repasse_periodo * rampup_pct))
         st.caption(f"Repasse total no período de referência: {fmt_brl(repasse_periodo)}")
         if eh_master:
             if st.button("✅ Confirmar disparo do bônus"):
                 st.success(
                     f"Disparado por {usuario['nome']} ({mes_ref}): {hosp_sel}, "
-                    f"{fmt_brl(repasse_periodo * 0.05)} sobre {len(meses_sel)} meses. "
+                    f"{fmt_brl(repasse_periodo * rampup_pct)} sobre {len(meses_sel)} meses. "
                     f"(Registro apenas nesta sessão - ainda não persiste em arquivo.)"
                 )

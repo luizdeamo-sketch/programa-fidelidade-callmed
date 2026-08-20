@@ -217,7 +217,7 @@ def listar_medicos(agg):
     return sorted(agg["medico"].unique())
 
 
-def calcular_niveis(agg, niveis=None, medicos_gestores=None):
+def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=None):
     """Para cada medico, percorre cronologicamente os meses (desde o primeiro mes dele na base
     ate o mes mais recente) e calcula nivel_bruto, nivel_vestido (com carencia aplicada) e os
     custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (reseta
@@ -230,10 +230,14 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None):
     esta nela tem Nivel 4 automatico em TODO o historico, junto com (nao substitui, conforme
     decisao do usuario em 2026-08-20) a deteccao automatica via pagamento de Coordenacao/Gestao
     (teve_coordenacao). Existe pra cobrir gestor que nunca teve um pagamento desse tipo lancado
-    certo na base."""
+    certo na base.
+
+    'custo_seguro_mes' permite recalcular com o custo do pacote de seguro customizado (editado na
+    tela de Regras do Programa) em vez do CUSTO_SEGURO_TOTAL_MES padrao aprovado."""
     niveis = sorted(niveis or NIVEIS, key=lambda n: n["idx"])
     nivel_por_idx = niveis_para_dict(niveis)
     medicos_gestores = set(medicos_gestores or [])
+    custo_seguro_mes = CUSTO_SEGURO_TOTAL_MES if custo_seguro_mes is None else custo_seguro_mes
     if agg.empty:
         return pd.DataFrame()
     meses_todos = sorted(agg["anomes"].unique())
@@ -280,7 +284,7 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None):
                     nivel_vestido = nivel_check
 
             info_vestido = nivel_por_idx[nivel_vestido]
-            custo_seguro = CUSTO_SEGURO_TOTAL_MES if info_vestido["tem_seguro"] else 0.0
+            custo_seguro = custo_seguro_mes if info_vestido["tem_seguro"] else 0.0
             custo_aumento_pct = valor_repasse * info_vestido["pct_aumento"]
             valor_total_geral = valor_repasse + custo_aumento_pct
 
@@ -306,10 +310,12 @@ def montar_agregado(arquivo=None):
     return agregar_mensal(df_linhas)
 
 
-def montar_base_completa(arquivo=None, niveis=None, medicos_gestores=None):
+def montar_base_completa(arquivo=None, niveis=None, medicos_gestores=None, custo_seguro_mes=None):
     """Pipeline completo: le, agrega, calcula niveis. Cacheable pela camada de UI."""
     agg = montar_agregado(arquivo)
-    return calcular_niveis(agg, niveis=niveis, medicos_gestores=medicos_gestores)
+    return calcular_niveis(
+        agg, niveis=niveis, medicos_gestores=medicos_gestores, custo_seguro_mes=custo_seguro_mes
+    )
 
 
 def status_atual(niveis_df, anomes_referencia=None):
