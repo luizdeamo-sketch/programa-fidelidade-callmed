@@ -609,6 +609,18 @@ with st.sidebar:
                 f"{badge_nivel(nivel_calc['idx'])} &nbsp; **{fmt_brl_md(valor_final_calc)}**{complemento}",
                 unsafe_allow_html=True,
             )
+            # Requisito pra sustentar o nível (pedido do usuário, 2026-08-20): quantidade mínima
+            # de plantões no mês e quantos desses precisam ser FDS/Noturno - pra já mostrar junto
+            # do valor, sem precisar abrir "Regras do Programa" pra saber o critério.
+            max_plantoes_calc = nivel_calc["max_plantoes"]
+            faixa_plantoes = (
+                f"{nivel_calc['min_plantoes']}+" if max_plantoes_calc is None
+                else f"{nivel_calc['min_plantoes']}–{max_plantoes_calc}"
+            )
+            requisito = f"{faixa_plantoes} plantões/mês"
+            if nivel_calc["min_fds"] > 0:
+                requisito += f", sendo ≥{nivel_calc['min_fds']} de FDS/Noturno"
+            st.caption(requisito)
 
     st.markdown("---")
 
