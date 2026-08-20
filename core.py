@@ -433,7 +433,7 @@ BENEFICIOS_NIVEL = {
     1: [
         "Suporte administrativo prioritário",
         "Apoio jurídico integral (retroatividade de 3 anos para fatos desconhecidos)",
-        "Convênio médico básico",
+        "Desconto no convênio médico ao contratar pela CallMed",
         "Antecipação de valores de plantão (pago até 2 dias após o plantão)",
     ],
     2: [
