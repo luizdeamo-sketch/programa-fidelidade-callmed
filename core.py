@@ -36,11 +36,14 @@ GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
 # "Antecipacao" bate com o proprio beneficio documentado do programa ("antecipacao de valores de
 # plantao, pago ate 2 dias apos o plantao" - Nivel 1), ou seja, e o MESMO plantao pago cedo, nao
 # um plantao a mais. "Callmed Premium" bate com o nome do proprio programa (pagamento do premio de
-# fidelidade entrando como linha de "plantao"). Confirmado pelo usuario: excluir todos da
-# contagem de volume/nivel E do valor de repasse (base do % de aumento) - sem isso o medico
-# recebe % de aumento em cima do proprio bonus, e o plantao original conta 2x.
+# fidelidade entrando como linha de "plantao"). Confirmado pelo usuario: excluir da contagem de
+# volume/nivel E do valor de repasse (base do % de aumento) - sem isso o medico recebe % de
+# aumento em cima do proprio bonus, e o plantao original conta 2x.
+# "Bonificacao" e "Gratificacao" ficaram FORA dessa lista (removidas em 2026-08-20, mesmo dia):
+# usuario confirmou que sao pagamento por plantao MAIOR que o normal ou por participacao em algo
+# atipico da rotina - ou seja, plantao de verdade, so com valor diferenciado. Contam normalmente.
 TIPOS_NAO_CONTAM_VOLUME = {
-    "Antecipação", "Callmed Premium", "Premiação Infiniti", "Bonificação", "Gratificação",
+    "Antecipação", "Callmed Premium", "Premiação Infiniti",
     ".Quatro Estrelas CallMed", ".Três Estrelas CallMed", ".Duas Estrelas CallMed",
 }
 
@@ -53,6 +56,16 @@ EXCLUSAO_HOSPITAL_REGEX = re.compile(r"covas|amhemed", re.IGNORECASE)
 # problema ja visto com a contaminacao do grupo "HSH"). So "Anestesia" conta pro nivel; isso ja
 # exclui UTI e Enfermaria automaticamente, sem precisar de regra separada pra elas.
 ESPECIALIDADE_VALIDA = "Anestesia"
+
+# Limiar (%) de linhas NAO-Anestesia numa operacao pra considera-la "dominante em anestesia" -
+# achado na auditoria de 2026-08-20 (pedido do usuario): varias operacoes que sao Anestesia quase
+# pura (Mario Covas 6,23%, Ana Costa 0-3,45%, Santa Helena 0-1,61%, etc.) tem uma pontinha de
+# linhas Enfermaria/UTI que o usuario confirmou ser ERRO DE CLASSIFICACAO no relatorio (a
+# operacao so faz Anestesia de verdade). A distribuicao real tem um gap enorme e limpo: as
+# operacoes "sujas por erro" ficam todas abaixo de ~7% de linhas nao-Anestesia, e as operacoes que
+# SAO de verdade multi-especialidade (Sao Bernardo, Notre UTI, Prevent, etc.) ficam todas acima de
+# ~67% - 10% fica bem no meio dessa folga, sem risco de pegar operacao genuinamente mista.
+LIMIAR_PCT_OUTRAS_OPERACAO_ANESTESIA = 10.0
 
 # Separador da chave composta operacao+especialidade usada na tela "Operacoes" (ex.: "Hospital
 # Sao Bernardo :: Anestesia") - precisa ser algo que nao apareca em nome de hospital nem de
@@ -148,11 +161,36 @@ def carregar_plantoes(arquivo=None):
     df["eh_tipo_nao_clinico"] = df["tipo"].isin(TIPOS_NAO_CONTAM_VOLUME)
     df["operacao"] = df["local"].apply(operacao_de)
     df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
-    df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
-    # "chave_operacao" = operacao (hospital/grupo) + especialidade, ex.: "Hospital Sao Bernardo ::
-    # Anestesia" - granularidade real da tela "Operacoes" (decisao do usuario em 2026-08-20: um
-    # hospital com Anestesia/Enfermaria/UTI vira 3 linhas flegaveis separadamente, nao 1 so).
-    especialidade_disp = df["especialidade"].replace("", "(sem especialidade)")
+
+    # Correcao de erro de classificacao (auditoria 2026-08-20, regra dada pelo usuario): se uma
+    # operacao e dominante em Anestesia (poucas linhas Enfermaria/UTI perdidas no meio - a
+    # operacao "so faz Anestesia" na pratica), trata essas linhas minoritarias como Anestesia
+    # tambem, porque o mais provavel e que vieram com a especialidade errada no relatorio. So se
+    # aplica a Enfermaria/UTI (o que o usuario citou) - Adm/Ambulatorio minoritarios continuam
+    # como estao, sao outra natureza de linha (normalmente pagamento administrativo mesmo).
+    contagem_por_operacao = df.groupby("operacao")["especialidade"].value_counts().unstack(fill_value=0)
+    total_por_operacao = contagem_por_operacao.sum(axis=1)
+    anestesia_por_operacao = contagem_por_operacao.get(ESPECIALIDADE_VALIDA, 0)
+    pct_outras_por_operacao = (total_por_operacao - anestesia_por_operacao) / total_por_operacao * 100
+    operacoes_dominantes_anestesia = set(
+        pct_outras_por_operacao[pct_outras_por_operacao < LIMIAR_PCT_OUTRAS_OPERACAO_ANESTESIA].index
+    )
+    eh_operacao_dominante_anestesia = df["operacao"].isin(operacoes_dominantes_anestesia)
+    eh_provavel_erro_especialidade = eh_operacao_dominante_anestesia & df["especialidade"].isin(
+        {"Enfermaria", "UTI"}
+    )
+    # "especialidade_efetiva" = especialidade real, exceto pelas linhas corrigidas acima - e o que
+    # o resto do pipeline (eh_anestesia, chave_operacao, listar_operacoes) usa a partir daqui,
+    # nunca a coluna "especialidade" crua.
+    df["especialidade_efetiva"] = df["especialidade"].where(
+        ~eh_provavel_erro_especialidade, ESPECIALIDADE_VALIDA
+    )
+    df["eh_anestesia"] = df["especialidade_efetiva"] == ESPECIALIDADE_VALIDA
+    # "chave_operacao" = operacao (hospital/grupo) + especialidade efetiva, ex.: "Hospital Sao
+    # Bernardo :: Anestesia" - granularidade real da tela "Operacoes" (decisao do usuario em
+    # 2026-08-20: um hospital com Anestesia/Enfermaria/UTI vira ate 3 linhas flegaveis
+    # separadamente, nao 1 so - exceto quando a correcao acima ja juntou tudo em Anestesia).
+    especialidade_disp = df["especialidade_efetiva"].replace("", "(sem especialidade)")
     df["chave_operacao"] = df["operacao"] + SEP_OP_ESP + especialidade_disp
     # plantao valido = conta pro volume do nivel: especialidade Anestesia, hospital nao excluido,
     # e nao e pagamento de gestao/coordenacao (isso conta separado, pra flag de coordenador). Este
@@ -175,18 +213,21 @@ def operacao_de(local):
 
 
 def listar_operacoes(df):
-    """Lista as combinacoes distintas de (operacao, especialidade) encontradas na base - cada uma
-    e uma linha flegavel separada na tela de Configuracoes > Operacoes (ex.: 'Hospital Sao
-    Bernardo' com Anestesia/Enfermaria/UTI vira 3 linhas, nao 1 com 'especialidades vistas' numa
-    lista - decisao do usuario em 2026-08-20, pra poder incluir/excluir cada combinacao por si)."""
+    """Lista as combinacoes distintas de (operacao, especialidade EFETIVA) encontradas na base -
+    cada uma e uma linha flegavel separada na tela de Configuracoes > Operacoes (ex.: 'Hospital
+    Sao Bernardo' com Anestesia/Enfermaria/UTI vira 3 linhas, nao 1 com 'especialidades vistas'
+    numa lista - decisao do usuario em 2026-08-20, pra poder incluir/excluir cada combinacao por
+    si). Usa especialidade_efetiva (nao a crua) - operacoes dominantes em Anestesia com
+    Enfermaria/UTI minoritarios ja aparecem com tudo junto como uma linha so de Anestesia (a
+    correcao de erro de classificacao ja rodou em carregar_plantoes)."""
     colunas_vazias = ["chave_operacao", "operacao", "especialidade", "total_linhas", "conta_hoje",
                        "incluida_padrao"]
     if df.empty:
         return pd.DataFrame(columns=colunas_vazias)
-    resumo = df.groupby(["chave_operacao", "operacao", "especialidade"]).agg(
+    resumo = df.groupby(["chave_operacao", "operacao", "especialidade_efetiva"]).agg(
         total_linhas=("valor", "count"),
         conta_hoje=("conta_pro_nivel", "sum"),
-    ).reset_index()
+    ).reset_index().rename(columns={"especialidade_efetiva": "especialidade"})
     resumo["especialidade"] = resumo["especialidade"].replace("", "(sem especialidade)")
     resumo["incluida_padrao"] = resumo["conta_hoje"] > 0
     return resumo.sort_values(["operacao", "especialidade"])
