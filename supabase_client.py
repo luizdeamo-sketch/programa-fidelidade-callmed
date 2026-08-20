@@ -1,5 +1,5 @@
-"""Cliente Supabase do Programa Fidelidade CallMed (sessão 2026-08-20: base de plantões e Apoio
-migradas do Excel local pro Supabase, pra não depender mais de acesso à máquina/OneDrive).
+"""Cliente Supabase do CallMed Premium (sessão 2026-08-20: base de plantões e Apoio migradas do
+Excel local pro Supabase, pra não depender mais de acesso à máquina/OneDrive).
 
 Credenciais em st.secrets["supabase"] (mesmo padrão de usuarios.py) - NÃO hardcoded aqui, mesmo a
 chave "publishable"/anon sendo tecnicamente segura de expor no client-side, porque combinada com

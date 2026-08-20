@@ -1,6 +1,5 @@
 """
-Motor de dados do Programa Fidelidade CallMed (Constelação) - versao 2, vigente a partir de
-Setembro/2026.
+Motor de dados do CallMed Premium - versao 2, vigente a partir de Setembro/2026.
 
 Regras implementadas (ver Programa_Constelacao_CallMed_v2.md na raiz do projeto para o
 documento de referencia completo, aprovado pelo usuario):

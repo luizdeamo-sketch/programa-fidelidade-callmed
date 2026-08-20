@@ -1,5 +1,5 @@
-"""Gera o PDF do Comunicado Individual do Programa Constelação — a versão feita pra ser entregue
-ao médico (não é a mesma tela do sistema, que mostra dado interno tipo custo de seguro pago pela
+"""Gera o PDF do Comunicado Individual do CallMed Premium — a versão feita pra ser entregue ao
+médico (não é a mesma tela do sistema, que mostra dado interno tipo custo de seguro pago pela
 empresa). Página única, reportlab puro (Platypus), sem depender de fonte/logo externos.
 """
 import io
@@ -86,7 +86,7 @@ def gerar_pdf_comunicado(
     doc = SimpleDocTemplate(
         buffer, pagesize=letter,
         topMargin=2.2 * cm, bottomMargin=2 * cm, leftMargin=2.4 * cm, rightMargin=2.4 * cm,
-        title=f"Comunicado Programa Constelação — {nome_medico}",
+        title=f"Comunicado CallMed Premium — {nome_medico}",
     )
     styles = getSampleStyleSheet()
     cor_texto = colors.HexColor("#1F2937")
@@ -116,7 +116,7 @@ def gerar_pdf_comunicado(
     )
 
     story = [
-        Paragraph("Programa Constelação CallMed", titulo),
+        Paragraph("CallMed Premium", titulo),
         Paragraph(f"Comunicado individual — {mes_ref}", subtitulo),
         HRFlowable(width="100%", thickness=1, color=cor_linha),
         Spacer(1, 14),
@@ -241,7 +241,7 @@ def gerar_pdf_comunicado(
     )
     story.append(Paragraph(
         f"CallMed Plantões — Grupo CM Callegaro · Emitido em {datetime.now().strftime('%d/%m/%Y')} "
-        "· Documento informativo, sujeito às regras vigentes do Programa Constelação.",
+        "· Documento informativo, sujeito às regras vigentes do CallMed Premium.",
         rodape,
     ))
 

@@ -1,5 +1,7 @@
-"""Programa Fidelidade CallMed (Constelação) - sistema interno, uso exclusivo do time
-administrativo (médicos não têm acesso - decisão do usuário, sessão 2026-08-18).
+"""CallMed Premium - sistema interno, uso exclusivo do time administrativo (médicos não têm
+acesso - decisão do usuário, sessão 2026-08-18). Nome oficial do sistema confirmado pelo usuário
+em 2026-08-20: "CallMed Premium", só isso - nomes anteriores usados no código/documentos
+("Programa Fidelidade CallMed", "Programa Constelação") ficam só como referência histórica interna.
 
 Papéis: master (Luiz - único que pode disparar o bônus de hospital em ramp-up, ação com custo
 real), gestor e analista (veem tudo, não disparam ações sensíveis).
@@ -21,7 +23,7 @@ import usuarios
 import comunicado_pdf
 import supabase_client
 
-st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", layout="wide")
+st.set_page_config(page_title="CallMed Premium", page_icon="⭐", layout="wide")
 
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Supabase)...")
@@ -314,7 +316,7 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
 
 # ---------------------------------------------------------------- LOGIN
 if "usuario" not in st.session_state:
-    st.title("⭐ Programa Fidelidade CallMed — Constelação")
+    st.title("⭐ CallMed Premium")
     st.caption("Acesso restrito ao time administrativo")
     with st.form("login"):
         email = st.text_input("E-mail")
@@ -464,7 +466,7 @@ with st.sidebar:
         else:
             st.caption("Envio de novo arquivo é exclusivo do papel master.")
 
-st.title("⭐ Programa Fidelidade CallMed — Constelação")
+st.title("⭐ CallMed Premium")
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
 
 # ============================================================= PÁGINA: BASE DE PLANTÕES
@@ -581,7 +583,7 @@ if pagina == "🗂️ Apoio (Local → Especialidade)":
 
 # ============================================================= PÁGINA: OPERAÇÕES
 if pagina == "🏥 Operações":
-    st.subheader("🏥 Operações que contam pro Programa Fidelidade")
+    st.subheader("🏥 Operações que contam pro CallMed Premium")
     st.caption(
         "Cada linha é uma combinação **hospital + especialidade** — ex.: 'Hospital São Bernardo' "
         "vira 3 linhas (Anestesia, Enfermaria, UTI), cada uma flegável separadamente. Desmarcar "
@@ -605,7 +607,7 @@ if pagina == "🏥 Operações":
             column_order=["Operação", "Especialidade", "Total de linhas", "Contam hoje", "Incluída"],
             disabled=["chave_operacao", "Operação", "Especialidade", "Total de linhas", "Contam hoje"],
             column_config={"Incluída": st.column_config.CheckboxColumn(
-                help="Desmarque para excluir essa combinação hospital+especialidade do Programa Fidelidade."
+                help="Desmarque para excluir essa combinação hospital+especialidade do CallMed Premium."
             )},
         )
         if st.button("✅ Aplicar mudanças e recalcular", type="primary"):

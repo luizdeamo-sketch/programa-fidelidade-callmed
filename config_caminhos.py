@@ -1,4 +1,4 @@
-"""Caminhos de dados do Programa Fidelidade CallMed (Constelação) - sistema separado do DRE.
+"""Caminhos de dados do CallMed Premium - sistema separado do DRE.
 
 DESDE 2026-08-20: a fonte PRINCIPAL de dados (plantoes + Apoio) e o Supabase (ver
 supabase_client.py e core.consultar_plantoes_supabase()/consultar_apoio_supabase()), nao mais o
@@ -16,7 +16,7 @@ BASE_DESKTOP = (
     r"\Operação e Estratégia - Operações e Estratégia\Financeiro CallMed"
 )
 
-# Fonte de dados do Programa Fidelidade (indicada pelo usuario, sessao 2026-08-18) - pasta
+# Fonte de dados do CallMed Premium (indicada pelo usuario, sessao 2026-08-18) - pasta
 # separada "1.ANALISES LUIZ", MESMO PADRAO de aba "BD" da base antiga, porem com uma coluna a
 # mais no inicio (tudo desloca +1) e uma coluna nova no fim, "Especialidade", que classifica
 # cada linha em Anestesia/Enfermaria/UTI/Adm/CallMed/Ambulatorio/Oftalto/etc - usada como fonte

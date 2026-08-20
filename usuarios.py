@@ -1,4 +1,4 @@
-"""Cadastro de usuários do time administrativo do Programa Fidelidade.
+"""Cadastro de usuários do time administrativo do CallMed Premium.
 
 Só o time adm acessa este sistema (médico não tem acesso - decisão do usuário, sessão
 2026-08-18). 3 papéis: master (exclusivo pra ações sensíveis, ex.: disparar bônus de hospital em
