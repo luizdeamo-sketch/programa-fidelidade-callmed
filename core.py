@@ -225,26 +225,49 @@ class ArquivoInvalidoError(Exception):
 
 
 def _ler_plantoes_excel(arquivo=None, retornar_stats=False):
-    """So a leitura crua do Excel (aba 'BD', formato "1.ANALISES LUIZ") - retorna DataFrame com
-    as colunas base (anomes/medico/data_raw/local/tipo/especialidade_bd/valor), sem nenhum flag
-    de elegibilidade calculado ainda. Ver enriquecer_plantoes() pro resto do pipeline - separado
-    pra poder trocar a FONTE (Excel local vs Supabase) sem duplicar a logica de enriquecimento.
+    """Le a planilha crua e devolve um DataFrame com as colunas base (anomes/medico/data_raw/
+    local/tipo/especialidade_bd/valor), sem nenhum flag de elegibilidade calculado ainda - ver
+    enriquecer_plantoes() pro resto do pipeline. Detecta automaticamente qual dos 2 formatos
+    aceitos a planilha usa, pela aba presente:
 
-    Linhas com valor <= 0 (ou nao numerico) sao descartadas - normalmente lixo/linha em branco,
-    mas pode incluir uma correcao negativa legitima tipo 'Diferença Vr de plantão' (ainda em
-    aberto, ver Programa_Constelacao_CallMed_v2.md secao 4). Antes isso era 100% silencioso
-    (achado na auditoria de 2026-08-20) - com retornar_stats=True, retorna (df, stats) com a
-    contagem de quantas linhas foram descartadas por isso, pra quem chama poder avisar o master
-    em vez de simplesmente sumir com o dado."""
+    - Aba 'BD' (formato "1.ANALISES LUIZ", histórico/legado - fallback offline, migração inicial).
+    - Aba 'Plantões' (export do sistema de escala "pegaplantao.com.br" - formato usado a partir de
+      2026-08-20 pra todo upload feito pela tela '📁 Fonte de dados', pedido do usuário: "segue o
+      formato da planilha que vamos sempre mandar"). Não tem colunas mes/ano separadas (deriva de
+      'Data') nem 'Especialidade' (especialidade_bd fica vazia - sem problema, a aba Apoio sempre
+      tem prioridade sobre ela no cálculo real, ver enriquecer_plantoes()). A coluna 'Profissional
+      de Plantão' é a fonte de verdade de quem realmente cobriu o plantão - usada como 'medico'
+      independente do que a coluna 'Situação' diz (ex.: 'Trocado'/'Troca de Fixo'/'Falta
+      Justificada' também usam essa coluna, sem filtro extra - confirmado pelo usuário 2026-08-20:
+      "considere a coluna profissional de plantão a real... tem que ser essa a referência pra
+      tudo"). 'Situação' em si não é lida.
+
+    Se nenhuma das duas abas existir, levanta ArquivoInvalidoError com uma mensagem clara (lista
+    as abas encontradas) em vez de deixar o KeyError cru do openpyxl derrubar a tela (achado real
+    2026-08-20: upload de planilha em formato errado quebrava o app inteiro com um traceback)."""
     arquivo = arquivo or cfg.resolver_base_plantoes()
     wb = load_workbook(arquivo, data_only=True, read_only=True)
-    if "BD" not in wb.sheetnames:
+    if "BD" in wb.sheetnames:
+        df, stats = _ler_plantoes_excel_formato_bd(wb)
+    elif "Plantões" in wb.sheetnames:
+        df, stats = _ler_plantoes_excel_formato_pegaplantao(wb)
+    else:
         abas_encontradas = ", ".join(wb.sheetnames) if wb.sheetnames else "nenhuma"
         wb.close()
         raise ArquivoInvalidoError(
-            f"Essa planilha não tem uma aba chamada 'BD' (abas encontradas: {abas_encontradas}). "
-            "Confira se é o arquivo certo, no mesmo formato da base de plantões."
+            f"Essa planilha não tem uma aba 'BD' nem 'Plantões' (abas encontradas: "
+            f"{abas_encontradas}). Confira se é o arquivo certo."
         )
+    if retornar_stats:
+        return df, stats
+    return df
+
+
+def _ler_plantoes_excel_formato_bd(wb):
+    """Aba 'BD' (formato "1.ANALISES LUIZ") - histórico/legado, mantido como fallback offline.
+    Linhas com valor <= 0 (ou nao numerico) sao descartadas - normalmente lixo/linha em branco,
+    mas pode incluir uma correcao negativa legitima tipo 'Diferença Vr de plantão' (ainda em
+    aberto, ver Programa_Constelacao_CallMed_v2.md secao 4)."""
     ws = wb["BD"]
     rows_iter = ws.iter_rows(values_only=True)
     next(rows_iter)
@@ -276,9 +299,80 @@ def _ler_plantoes_excel(arquivo=None, retornar_stats=False):
         })
     wb.close()
     df = pd.DataFrame(linhas)
-    if retornar_stats:
-        return df, {"descartadas_valor_invalido": descartadas_valor_invalido}
-    return df
+    return df, {"descartadas_valor_invalido": descartadas_valor_invalido}
+
+
+_COLUNAS_OBRIGATORIAS_PEGAPLANTAO = ["Data", "Local", "Profissional de Plantão", "Tipo", "Valor"]
+
+
+def _ler_plantoes_excel_formato_pegaplantao(wb):
+    """Aba 'Plantões' - export do sistema de escala "pegaplantao.com.br", formato padrão a partir
+    de 2026-08-20. Tem algumas linhas de metadado antes do cabeçalho de verdade (título, período,
+    'gerado em...') - a quantidade pode variar entre exports, então acha o cabeçalho procurando a
+    linha cuja 1ª célula é literalmente 'Data', em vez de pular um número fixo de linhas. Também
+    tem uma linha de rodapé 'Total Geral' (sem médico - já cai fora pelo filtro de médico vazio) e
+    um aviso de autenticidade no fim (mesma coisa, sem médico)."""
+    ws = wb["Plantões"]
+    rows_iter = ws.iter_rows(values_only=True)
+
+    header = None
+    for row in rows_iter:
+        primeira = str(row[0]).strip() if row and row[0] is not None else ""
+        if primeira == "Data":
+            header = row
+            break
+    if header is None:
+        wb.close()
+        raise ArquivoInvalidoError(
+            "Não encontrei a linha de cabeçalho (coluna 'Data') na aba 'Plantões' dessa planilha. "
+            "Confira se é o arquivo certo, exportado do sistema de escala."
+        )
+    col_idx = {str(h).strip(): i for i, h in enumerate(header) if h is not None}
+    faltando = [c for c in _COLUNAS_OBRIGATORIAS_PEGAPLANTAO if c not in col_idx]
+    if faltando:
+        wb.close()
+        raise ArquivoInvalidoError(
+            f"A aba 'Plantões' dessa planilha não tem a(s) coluna(s) esperada(s): "
+            f"{', '.join(faltando)}. Confira se é o arquivo certo."
+        )
+    i_data = col_idx["Data"]
+    i_local = col_idx["Local"]
+    i_medico = col_idx["Profissional de Plantão"]
+    i_tipo = col_idx["Tipo"]
+    i_valor = col_idx["Valor"]
+    n_colunas_min = max(i_data, i_local, i_medico, i_tipo, i_valor) + 1
+
+    linhas = []
+    descartadas_valor_invalido = 0
+    for row in rows_iter:
+        if len(row) < n_colunas_min:
+            continue
+        data_raw, local, medico, tipo, valor = (
+            row[i_data], row[i_local], row[i_medico], row[i_tipo], row[i_valor]
+        )
+        if not isinstance(valor, (int, float)) or valor <= 0:
+            if medico and medico not in PLACEHOLDERS_MEDICO:
+                descartadas_valor_invalido += 1
+            continue
+        if not medico or medico in PLACEHOLDERS_MEDICO:
+            continue
+        # Sem colunas mes/ano separadas nesse formato - deriva da propria Data (mesmo texto
+        # "dd/mm/aaaa hh:mm" usado como data_raw, dayfirst=True igual ao resto do sistema).
+        data_dt = pd.to_datetime(data_raw, dayfirst=True, errors="coerce")
+        if pd.isna(data_dt):
+            continue
+        linhas.append({
+            "anomes": f"{data_dt.year}-{data_dt.month:02d}",
+            "medico": str(medico).strip(),
+            "data_raw": data_raw,
+            "local": str(local or ""),
+            "tipo": str(tipo or ""),
+            "especialidade_bd": "",
+            "valor": float(valor),
+        })
+    wb.close()
+    df = pd.DataFrame(linhas)
+    return df, {"descartadas_valor_invalido": descartadas_valor_invalido}
 
 
 def enriquecer_plantoes(df, apoio_df=None, arquivo=None):

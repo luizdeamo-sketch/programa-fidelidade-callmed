@@ -638,7 +638,8 @@ with st.sidebar:
 
         if eh_master:
             novo_arquivo = st.file_uploader(
-                "Enviar planilha de plantões (mesmo formato da aba 'BD', qualquer período)",
+                "Enviar planilha de plantões (export do pegaplantao.com.br, aba 'BD' antiga "
+                "também aceita, qualquer período)",
                 type=["xlsx"],
             )
             if novo_arquivo is not None:
