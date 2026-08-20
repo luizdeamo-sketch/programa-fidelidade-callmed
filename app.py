@@ -1133,7 +1133,15 @@ def _resumo_faltam_proximo_nivel(row):
     return f"N{prox['nivel_idx']}: +{' e +'.join(partes)}"
 
 
-tabela = tabela.assign(faltam_proximo_nivel=tabela.apply(_resumo_faltam_proximo_nivel, axis=1))
+# Bug real encontrado ao vivo na auditoria (2026-08-20): com "Filtrar por nível" vazio (ninguém
+# selecionado, ex.: clicando "Clear all"), tabela fica com 0 linhas - df.apply(func, axis=1) num
+# DataFrame vazio devolve o próprio DataFrame (sem chamar func nenhuma vez, pandas não tem como
+# inferir o formato de saída), não uma Series, e o .assign() quebrava com ValueError. Guarda
+# explícita pro caso vazio em vez de deixar a tela inteira travar num erro.
+if tabela.empty:
+    tabela = tabela.assign(faltam_proximo_nivel=pd.Series(dtype="object"))
+else:
+    tabela = tabela.assign(faltam_proximo_nivel=tabela.apply(_resumo_faltam_proximo_nivel, axis=1))
 st.caption("Clique numa linha pra abrir o relatório completo do médico logo abaixo.")
 evento_tabela_medicos = st.dataframe(
     tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno", "nivel_bruto",
