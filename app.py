@@ -15,6 +15,7 @@ Lovable já discutida.
 import copy
 import io
 import json
+import pathlib
 
 import streamlit as st
 import pandas as pd
@@ -23,7 +24,14 @@ import usuarios
 import comunicado_pdf
 import supabase_client
 
-st.set_page_config(page_title="CallMed Premium", page_icon="⭐", layout="wide")
+# Marca (logo em variações - fundo claro/escuro, colorida/mono - sessão 2026-08-20, arquivos
+# fornecidos pelo usuário). ASSETS_DIR e os caminhos ficam antes do set_page_config porque o
+# favicon precisa do caminho do ícone já resolvido.
+ASSETS_DIR = pathlib.Path(__file__).parent / "assets"
+LOGO_COLORIDA = ASSETS_DIR / "logo_horizontal_colorida.png"
+ICONE_CM_AZUL = ASSETS_DIR / "icone_cm_azul.png"
+
+st.set_page_config(page_title="CallMed Premium", page_icon=str(ICONE_CM_AZUL), layout="wide")
 
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Supabase)...")
@@ -316,7 +324,9 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
 
 # ---------------------------------------------------------------- LOGIN
 if "usuario" not in st.session_state:
-    st.title("⭐ CallMed Premium")
+    col_logo_a, col_logo_b, col_logo_c = st.columns([1, 1, 1])
+    with col_logo_b:
+        st.image(str(LOGO_COLORIDA), use_container_width=True)
     st.caption("Acesso restrito ao time administrativo")
     with st.form("login"):
         email = st.text_input("E-mail")
@@ -405,6 +415,7 @@ def _restaurar_rampup():
 
 
 with st.sidebar:
+    st.image(str(ICONE_CM_AZUL), width=56)
     st.markdown(f"**{usuario['nome']}**")
     st.caption(f"Papel: {usuario['papel']}")
     if st.button("Sair"):
@@ -466,7 +477,7 @@ with st.sidebar:
         else:
             st.caption("Envio de novo arquivo é exclusivo do papel master.")
 
-st.title("⭐ CallMed Premium")
+st.image(str(LOGO_COLORIDA), width=260)
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
 
 # ============================================================= PÁGINA: BASE DE PLANTÕES

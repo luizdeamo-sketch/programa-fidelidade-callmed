@@ -3,6 +3,7 @@ médico (não é a mesma tela do sistema, que mostra dado interno tipo custo de 
 empresa). Página única, reportlab puro (Platypus), sem depender de fonte/logo externos.
 """
 import io
+import pathlib
 from datetime import datetime
 
 import matplotlib
@@ -18,6 +19,12 @@ from reportlab.platypus import (
 )
 
 import core
+
+# Logo colorida no cabeçalho do comunicado (mesma marca usada no sistema - arquivo fornecido pelo
+# usuário na sessão 2026-08-20). Proporção original 2875x1688 preservada pra não distorcer.
+_LOGO_PATH = pathlib.Path(__file__).parent / "assets" / "logo_horizontal_colorida.png"
+_LOGO_LARGURA = 6.5 * cm
+_LOGO_ALTURA = _LOGO_LARGURA * (1688 / 2875)
 
 CORES_NIVEL = {
     1: colors.HexColor("#6B7280"),
@@ -93,9 +100,6 @@ def gerar_pdf_comunicado(
     cor_texto_leve = colors.HexColor("#6B7280")
     cor_linha = colors.HexColor("#E5E7EB")
 
-    titulo = ParagraphStyle(
-        "TituloCallmed", parent=styles["Title"], fontSize=20, spaceAfter=2, textColor=cor_texto,
-    )
     subtitulo = ParagraphStyle(
         "Subtitulo", parent=styles["Normal"], fontSize=11, textColor=cor_texto_leve, spaceAfter=16,
     )
@@ -116,7 +120,8 @@ def gerar_pdf_comunicado(
     )
 
     story = [
-        Paragraph("CallMed Premium", titulo),
+        Image(str(_LOGO_PATH), width=_LOGO_LARGURA, height=_LOGO_ALTURA, hAlign="LEFT"),
+        Spacer(1, 6),
         Paragraph(f"Comunicado individual — {mes_ref}", subtitulo),
         HRFlowable(width="100%", thickness=1, color=cor_linha),
         Spacer(1, 14),
