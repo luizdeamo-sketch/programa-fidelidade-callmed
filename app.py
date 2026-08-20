@@ -79,6 +79,239 @@ def badge_nivel(n):
     return f'<span style="background:{cores.get(n,"#999")};color:#111;padding:2px 10px;border-radius:12px;font-weight:600;">Nível {n}</span>'
 
 
+def renderizar_relatorio_medico(nome_medico, mes_referencia):
+    """Conteúdo completo do relatório de um médico (abas 🖥️ Visão Sistema + 📋 Comunicado, com
+    botão de PDF) - função compartilhada entre a página dedicada '📄 Relatório do Médico' e o
+    clique numa linha da tabela de médicos na Visão Geral (pedido do usuário 2026-08-20: mesmo
+    conteúdo nos dois lugares, sem duplicar lógica). Usa df_linhas/niveis_df do escopo global -
+    já estão montados no momento em que essa função é chamada (depois do login/carregamento)."""
+    hist_rel = niveis_df[niveis_df["medico"] == nome_medico].sort_values("anomes")
+    if hist_rel.empty:
+        st.warning("Sem histórico pra esse médico.")
+        return
+
+    if mes_referencia in hist_rel["anomes"].values:
+        atual_rel = hist_rel[hist_rel["anomes"] == mes_referencia].iloc[0]
+    else:
+        atual_rel = hist_rel.iloc[-1]
+        st.warning(
+            f"Sem dado em {mes_referencia} pra esse médico — mostrando o último mês disponível "
+            f"({atual_rel['anomes']})."
+        )
+
+    nivel_vestido_rel = int(atual_rel["nivel_vestido"])
+    info_nivel_rel = core.NIVEL_POR_IDX[nivel_vestido_rel]
+    tempo_nivel_rel = core.tempo_no_nivel_atual(atual_rel)
+    prox_info_rel = core.proximo_nivel_info(atual_rel)
+    primeiro_mes_rel = hist_rel["anomes"].min()
+    # hist_rel ja tem 1 linha por mes desde o primeiro plantao do medico ate o mes mais recente da
+    # base inteira (meses sem plantao viram linha com 0, pra carencia funcionar certo - ver
+    # calcular_niveis) - entao len(hist_rel) e literalmente "quantos meses de casa", sem gap.
+    tempo_de_casa_rel = len(hist_rel)
+
+    # Projecao financeira de bater o proximo nivel ainda este mes (pedido do usuario, pra engajar
+    # o medico): usa o ticket medio por plantao do proprio mes pra estimar o valor de repasse SE
+    # ele completasse os plantoes que faltam, e aplica o % do proximo nivel em cima disso. E uma
+    # estimativa (o ticket medio dos proximos plantoes pode ser diferente do que ja fez), por isso
+    # o comunicado deixa isso explicito como aproximacao.
+    if prox_info_rel:
+        n_plantoes_atual = int(atual_rel["n_plantoes"])
+        ticket_medio_rel = (
+            float(atual_rel["valor_repasse"]) / n_plantoes_atual if n_plantoes_atual > 0 else 0.0
+        )
+        valor_projetado_rel = (
+            float(atual_rel["valor_repasse"]) + prox_info_rel["faltam_plantoes"] * ticket_medio_rel
+        )
+        prox_nivel_idx_rel = int(atual_rel["nivel_bruto"]) + 1
+        info_prox_nivel_rel = core.NIVEL_POR_IDX[prox_nivel_idx_rel]
+        ganho_projetado_rel = valor_projetado_rel * info_prox_nivel_rel["pct_aumento"]
+        prox_info_rel = {
+            **prox_info_rel,
+            "proximo_pct_exibido": info_prox_nivel_rel["pct_exibido"],
+            "ganho_extra_estimado": max(
+                0.0, ganho_projetado_rel - float(atual_rel["custo_aumento_pct_mes"])
+            ),
+        }
+
+    # Historico recente (ultimos 12 meses TERMINANDO no mes do relatorio, nao no mes mais recente
+    # da base inteira - importante pra quando o admin navega pra um mes passado) pro grafico do
+    # comunicado - plantoes + valor recebido.
+    historico_mensal_rel = [
+        {"mes": row["anomes"], "n_plantoes": int(row["n_plantoes"]), "valor": float(row["valor_repasse"])}
+        for _, row in hist_rel[hist_rel["anomes"] <= mes_referencia].tail(12).iterrows()
+    ]
+
+    aba_sistema, aba_medico = st.tabs(["🖥️ Visão Sistema", "📋 Comunicado ao Médico"])
+
+    # ---------------------------------------------------------- ABA SISTEMA (interna)
+    with aba_sistema:
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_vestido_rel)}", unsafe_allow_html=True)
+        m2.metric("Tempo de casa", f"{tempo_de_casa_rel} mês(es)", help=f"Desde {primeiro_mes_rel}")
+        m3.metric(
+            "Tempo no nível atual",
+            f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+        )
+        m4.metric("Aumento no plantão", f"{info_nivel_rel['pct_exibido']}%")
+
+        st.markdown(f"#### Plantões em {mes_referencia}")
+        plantoes_mes_rel = df_linhas[
+            (df_linhas["medico"] == nome_medico) & (df_linhas["anomes"] == mes_referencia)
+        ].sort_values("data_dt")
+        if plantoes_mes_rel.empty:
+            st.caption("Nenhum plantão lançado nesse mês.")
+        else:
+            st.dataframe(
+                plantoes_mes_rel[["data_dt", "operacao", "tipo", "valor", "eh_fds", "eh_noturno",
+                                   "conta_pro_nivel"]]
+                .rename(columns={
+                    "data_dt": "Data", "operacao": "Operação", "tipo": "Tipo", "valor": "Valor",
+                    "eh_fds": "FDS", "eh_noturno": "Noturno", "conta_pro_nivel": "Contou pro nível",
+                })
+                .style.format({
+                    "Valor": fmt_brl,
+                    "Data": lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "—",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+            # Transparencia sobre POR QUE cada linha conta (ou nao) - pedido do usuario apos notar
+            # um medico (Sergio Gratão) com plantao contando pro programa sem ser anestesista de
+            # verdade. Desde 2026-08-20 o sistema cruza contra a aba "Apoio" do proprio arquivo de
+            # plantoes (fonte de verdade oficial pro Setor Definido/Especialidade, mantida pela
+            # area - ver core.carregar_apoio()) em vez de confiar na coluna Especialidade da BD,
+            # que tem erro de classificacao linha a linha. Essa tabela mostra a comparacao.
+            with st.expander("🔍 Por que esses plantões contam (ou não) pro programa?"):
+                resumo_combos = (
+                    plantoes_mes_rel.groupby(["operacao_bd", "especialidade_bd", "operacao",
+                                               "especialidade", "chave_operacao", "sem_match_apoio"])
+                    .agg(linhas=("valor", "count"), conta=("conta_pro_nivel", "sum"))
+                    .reset_index()
+                )
+                resumo_combos["Habilitada em Operações"] = ~resumo_combos["chave_operacao"].isin(
+                    st.session_state["operacoes_excluidas"]
+                )
+                resumo_combos["Divergia do relatório original?"] = (
+                    resumo_combos["especialidade_bd"] != resumo_combos["especialidade"]
+                )
+                st.dataframe(
+                    resumo_combos[["operacao", "especialidade", "especialidade_bd", "linhas",
+                                    "conta", "Habilitada em Operações", "Divergia do relatório original?",
+                                    "sem_match_apoio"]]
+                    .rename(columns={
+                        "operacao": "Operação (Apoio)", "especialidade": "Especialidade (Apoio)",
+                        "especialidade_bd": "Especialidade (relatório original)",
+                        "linhas": "Linhas no mês", "conta": "Contaram",
+                        "sem_match_apoio": "Sem correspondência na aba Apoio",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "Operação/Especialidade vêm da aba 'Apoio' do arquivo de plantões (fonte de "
+                    "verdade oficial mantida pela área), não da coluna Especialidade lançada na "
+                    "aba BD — essa diverge da Apoio em ~2,3% das linhas da base inteira. Se uma "
+                    "combinação está com 'Habilitada em Operações' desmarcada, é possível excluir "
+                    "esse médico do programa desmarcando ela na tela 🏥 Operações. 'Sem "
+                    "correspondência na aba Apoio' marcado é alerta de dado novo — o Local não "
+                    "está cadastrado lá ainda, o sistema caiu num critério de reserva menos confiável."
+                )
+
+        st.markdown("#### Bônus e custos do mês")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Valor dos plantões", fmt_brl(atual_rel["valor_repasse"]))
+        b2.metric("Valor do aumento", fmt_brl(atual_rel["custo_aumento_pct_mes"]))
+        b3.metric("Custo do seguro (empresa)", fmt_brl(atual_rel["custo_seguro_mes"]))
+        b4.metric("Total geral", fmt_brl(atual_rel["valor_total_geral"]))
+
+        with st.expander("Ver histórico completo (todos os meses)"):
+            st.dataframe(
+                hist_rel[["anomes", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto",
+                          "nivel_vestido", "valor_repasse", "valor_total_geral"]]
+                .rename(columns={
+                    "anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
+                    "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
+                    "nivel_vestido": "Nível (vigente)", "valor_repasse": "Valor Plantões",
+                    "valor_total_geral": "Total Geral",
+                })
+                .style.format({"Valor Plantões": fmt_brl, "Total Geral": fmt_brl}),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ---------------------------------------------------------- ABA MÉDICO (comunicado + PDF)
+    with aba_medico:
+        st.caption(
+            "Versão pronta pra compartilhar com o médico — sem os custos internos pagos pela empresa."
+        )
+        st.markdown(
+            f"### Nível {nivel_vestido_rel} — {info_nivel_rel['pct_exibido']}% de aumento no plantão"
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Plantões no mês", int(atual_rel["n_plantoes"]))
+        c2.metric("FDS/Noturno", int(atual_rel["n_fds_ou_noturno"]))
+        c3.metric(
+            "Tempo no nível", f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+        )
+        c4.metric("Tempo com a CallMed", f"{tempo_de_casa_rel} mês(es)")
+
+        st.markdown("##### Benefícios inclusos")
+        for beneficio in core.beneficios_acumulados(nivel_vestido_rel):
+            st.markdown(f"- {beneficio}")
+
+        if prox_info_rel:
+            partes_rel = []
+            if prox_info_rel["faltam_plantoes"] > 0:
+                partes_rel.append(f"{prox_info_rel['faltam_plantoes']} plantão(ões)")
+            if prox_info_rel["faltam_fds_ou_noturno"] > 0:
+                partes_rel.append(f"{prox_info_rel['faltam_fds_ou_noturno']} plantão(ões) de FDS/noturno")
+            if partes_rel:
+                msg = f"Faltam {' e '.join(partes_rel)} no mês pro {prox_info_rel['proximo_nivel']}"
+                msg += f" ({prox_info_rel['proximo_pct_exibido']}% de aumento)"
+                if prox_info_rel["ganho_extra_estimado"] > 0:
+                    msg += f" — cerca de **{fmt_brl(prox_info_rel['ganho_extra_estimado'])} a mais** de bonificação neste mês."
+                else:
+                    msg += "."
+                st.info(msg)
+            else:
+                st.info(
+                    f"O volume deste mês já sustenta o {prox_info_rel['proximo_nivel']} — o "
+                    "benefício passa a valer após a carência, se mantido nos próximos meses."
+                )
+
+        if len(historico_mensal_rel) >= 2:
+            st.markdown("##### Histórico com a CallMed")
+            hist_chart_df = pd.DataFrame(historico_mensal_rel).set_index("mes")
+            cc1, cc2 = st.columns(2)
+            cc1.bar_chart(hist_chart_df[["n_plantoes"]].rename(columns={"n_plantoes": "Plantões"}))
+            cc2.line_chart(hist_chart_df[["valor"]].rename(columns={"valor": "Valor recebido (R$)"}))
+            st.caption(f"Últimos {len(historico_mensal_rel)} meses — prévia; o PDF traz o gráfico completo.")
+
+        # So os plantoes que CONTARAM pro programa (mesmo escopo que gerou n_plantoes/valor_repasse)
+        # - um plantao excluido (tipo nao-clinico, operacao fora do escopo etc.) nao aparece no PDF
+        # do medico, pra "Total de plantoes" bater exatamente com a soma das linhas listadas.
+        plantoes_contados_rel = plantoes_mes_rel[plantoes_mes_rel["conta_pro_nivel"]].sort_values("data_dt")
+        plantoes_detalhe_rel = [
+            {
+                "data": row["data_dt"].strftime("%d/%m/%Y") if pd.notna(row["data_dt"]) else "—",
+                "operacao": row["operacao"], "tipo": row["tipo"], "valor": row["valor"],
+            }
+            for _, row in plantoes_contados_rel.iterrows()
+        ]
+        pdf_bytes_rel = comunicado_pdf.gerar_pdf_comunicado(
+            nome_medico=nome_medico, mes_ref=mes_referencia, nivel_vestido=nivel_vestido_rel,
+            n_plantoes=int(atual_rel["n_plantoes"]), n_fds=int(atual_rel["n_fds"]),
+            n_noturno=int(atual_rel["n_noturno"]), pct_aumento_exibido=info_nivel_rel["pct_exibido"],
+            plantoes_detalhe=plantoes_detalhe_rel, valor_total_plantoes=atual_rel["valor_repasse"],
+            valor_bonificacao=atual_rel["custo_aumento_pct_mes"],
+            tempo_no_nivel=tempo_nivel_rel, proximo_nivel_info=prox_info_rel,
+            tempo_de_casa=tempo_de_casa_rel, historico_mensal=historico_mensal_rel,
+        )
+        st.download_button(
+            "📄 Baixar PDF para o médico", data=pdf_bytes_rel,
+            file_name=f"comunicado_{nome_medico.replace(' ', '_')}_{mes_referencia}.pdf",
+            mime="application/pdf", type="primary", key=f"pdf_{nome_medico}_{mes_referencia}",
+        )
+
+
 # ---------------------------------------------------------------- LOGIN
 if "usuario" not in st.session_state:
     st.title("⭐ Programa Fidelidade CallMed — Constelação")
@@ -610,229 +843,7 @@ if pagina == "📄 Relatório do Médico":
         st.info("Selecione um médico para gerar o relatório.")
         st.stop()
 
-    mes_relatorio = st.session_state["mes_atual"]
-    hist_rel = niveis_df[niveis_df["medico"] == nome_rel].sort_values("anomes")
-    if mes_relatorio in hist_rel["anomes"].values:
-        atual_rel = hist_rel[hist_rel["anomes"] == mes_relatorio].iloc[0]
-    else:
-        atual_rel = hist_rel.iloc[-1]
-        st.warning(
-            f"Sem dado em {mes_relatorio} pra esse médico — mostrando o último mês disponível "
-            f"({atual_rel['anomes']})."
-        )
-
-    nivel_vestido_rel = int(atual_rel["nivel_vestido"])
-    info_nivel_rel = core.NIVEL_POR_IDX[nivel_vestido_rel]
-    tempo_nivel_rel = core.tempo_no_nivel_atual(atual_rel)
-    prox_info_rel = core.proximo_nivel_info(atual_rel)
-    primeiro_mes_rel = hist_rel["anomes"].min()
-    # hist_rel ja tem 1 linha por mes desde o primeiro plantao do medico ate o mes mais recente da
-    # base inteira (meses sem plantao viram linha com 0, pra carencia funcionar certo - ver
-    # calcular_niveis) - entao len(hist_rel) e literalmente "quantos meses de casa", sem gap.
-    tempo_de_casa_rel = len(hist_rel)
-
-    # Projecao financeira de bater o proximo nivel ainda este mes (pedido do usuario, pra engajar
-    # o medico): usa o ticket medio por plantao do proprio mes pra estimar o valor de repasse SE
-    # ele completasse os plantoes que faltam, e aplica o % do proximo nivel em cima disso. E uma
-    # estimativa (o ticket medio dos proximos plantoes pode ser diferente do que ja fez), por isso
-    # o comunicado deixa isso explicito como aproximacao.
-    if prox_info_rel:
-        n_plantoes_atual = int(atual_rel["n_plantoes"])
-        ticket_medio_rel = (
-            float(atual_rel["valor_repasse"]) / n_plantoes_atual if n_plantoes_atual > 0 else 0.0
-        )
-        valor_projetado_rel = (
-            float(atual_rel["valor_repasse"]) + prox_info_rel["faltam_plantoes"] * ticket_medio_rel
-        )
-        prox_nivel_idx_rel = int(atual_rel["nivel_bruto"]) + 1
-        info_prox_nivel_rel = core.NIVEL_POR_IDX[prox_nivel_idx_rel]
-        ganho_projetado_rel = valor_projetado_rel * info_prox_nivel_rel["pct_aumento"]
-        prox_info_rel = {
-            **prox_info_rel,
-            "proximo_pct_exibido": info_prox_nivel_rel["pct_exibido"],
-            "ganho_extra_estimado": max(
-                0.0, ganho_projetado_rel - float(atual_rel["custo_aumento_pct_mes"])
-            ),
-        }
-
-    # Historico recente (ultimos 12 meses TERMINANDO no mes do relatorio, nao no mes mais recente
-    # da base inteira - importante pra quando o admin navega pra um mes passado) pro grafico do
-    # comunicado - plantoes + valor recebido.
-    historico_mensal_rel = [
-        {"mes": row["anomes"], "n_plantoes": int(row["n_plantoes"]), "valor": float(row["valor_repasse"])}
-        for _, row in hist_rel[hist_rel["anomes"] <= mes_relatorio].tail(12).iterrows()
-    ]
-
-    aba_sistema, aba_medico = st.tabs(["🖥️ Visão Sistema", "📋 Comunicado ao Médico"])
-
-    # ---------------------------------------------------------- ABA SISTEMA (interna)
-    with aba_sistema:
-        m1, m2, m3, m4 = st.columns(4)
-        m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_vestido_rel)}", unsafe_allow_html=True)
-        m2.metric("Tempo de casa", f"{tempo_de_casa_rel} mês(es)", help=f"Desde {primeiro_mes_rel}")
-        m3.metric(
-            "Tempo no nível atual",
-            f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
-        )
-        m4.metric("Aumento no plantão", f"{info_nivel_rel['pct_exibido']}%")
-
-        st.markdown(f"#### Plantões em {mes_relatorio}")
-        plantoes_mes_rel = df_linhas[
-            (df_linhas["medico"] == nome_rel) & (df_linhas["anomes"] == mes_relatorio)
-        ].sort_values("data_dt")
-        if plantoes_mes_rel.empty:
-            st.caption("Nenhum plantão lançado nesse mês.")
-        else:
-            st.dataframe(
-                plantoes_mes_rel[["data_dt", "operacao", "tipo", "valor", "eh_fds", "eh_noturno",
-                                   "conta_pro_nivel"]]
-                .rename(columns={
-                    "data_dt": "Data", "operacao": "Operação", "tipo": "Tipo", "valor": "Valor",
-                    "eh_fds": "FDS", "eh_noturno": "Noturno", "conta_pro_nivel": "Contou pro nível",
-                })
-                .style.format({
-                    "Valor": fmt_brl,
-                    "Data": lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "—",
-                }),
-                use_container_width=True, hide_index=True,
-            )
-
-            # Transparencia sobre POR QUE cada linha conta (ou nao) - pedido do usuario apos notar
-            # um medico (Sergio Gratão) com plantao contando pro programa sem ser anestesista de
-            # verdade. Desde 2026-08-20 o sistema cruza contra a aba "Apoio" do proprio arquivo de
-            # plantoes (fonte de verdade oficial pro Setor Definido/Especialidade, mantida pela
-            # area - ver core.carregar_apoio()) em vez de confiar na coluna Especialidade da BD,
-            # que tem erro de classificacao linha a linha. Essa tabela mostra a comparacao.
-            with st.expander("🔍 Por que esses plantões contam (ou não) pro programa?"):
-                resumo_combos = (
-                    plantoes_mes_rel.groupby(["operacao_bd", "especialidade_bd", "operacao",
-                                               "especialidade", "chave_operacao", "sem_match_apoio"])
-                    .agg(linhas=("valor", "count"), conta=("conta_pro_nivel", "sum"))
-                    .reset_index()
-                )
-                resumo_combos["Habilitada em Operações"] = ~resumo_combos["chave_operacao"].isin(
-                    st.session_state["operacoes_excluidas"]
-                )
-                resumo_combos["Divergia do relatório original?"] = (
-                    resumo_combos["especialidade_bd"] != resumo_combos["especialidade"]
-                )
-                st.dataframe(
-                    resumo_combos[["operacao", "especialidade", "especialidade_bd", "linhas",
-                                    "conta", "Habilitada em Operações", "Divergia do relatório original?",
-                                    "sem_match_apoio"]]
-                    .rename(columns={
-                        "operacao": "Operação (Apoio)", "especialidade": "Especialidade (Apoio)",
-                        "especialidade_bd": "Especialidade (relatório original)",
-                        "linhas": "Linhas no mês", "conta": "Contaram",
-                        "sem_match_apoio": "Sem correspondência na aba Apoio",
-                    }),
-                    use_container_width=True, hide_index=True,
-                )
-                st.caption(
-                    "Operação/Especialidade vêm da aba 'Apoio' do arquivo de plantões (fonte de "
-                    "verdade oficial mantida pela área), não da coluna Especialidade lançada na "
-                    "aba BD — essa diverge da Apoio em ~2,3% das linhas da base inteira. Se uma "
-                    "combinação está com 'Habilitada em Operações' desmarcada, é possível excluir "
-                    "esse médico do programa desmarcando ela na tela 🏥 Operações. 'Sem "
-                    "correspondência na aba Apoio' marcado é alerta de dado novo — o Local não "
-                    "está cadastrado lá ainda, o sistema caiu num critério de reserva menos confiável."
-                )
-
-        st.markdown("#### Bônus e custos do mês")
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("Valor dos plantões", fmt_brl(atual_rel["valor_repasse"]))
-        b2.metric("Valor do aumento", fmt_brl(atual_rel["custo_aumento_pct_mes"]))
-        b3.metric("Custo do seguro (empresa)", fmt_brl(atual_rel["custo_seguro_mes"]))
-        b4.metric("Total geral", fmt_brl(atual_rel["valor_total_geral"]))
-
-        with st.expander("Ver histórico completo (todos os meses)"):
-            st.dataframe(
-                hist_rel[["anomes", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto",
-                          "nivel_vestido", "valor_repasse", "valor_total_geral"]]
-                .rename(columns={
-                    "anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
-                    "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
-                    "nivel_vestido": "Nível (vigente)", "valor_repasse": "Valor Plantões",
-                    "valor_total_geral": "Total Geral",
-                })
-                .style.format({"Valor Plantões": fmt_brl, "Total Geral": fmt_brl}),
-                use_container_width=True, hide_index=True,
-            )
-
-    # ---------------------------------------------------------- ABA MÉDICO (comunicado + PDF)
-    with aba_medico:
-        st.caption(
-            "Versão pronta pra compartilhar com o médico — sem os custos internos pagos pela empresa."
-        )
-        st.markdown(
-            f"### Nível {nivel_vestido_rel} — {info_nivel_rel['pct_exibido']}% de aumento no plantão"
-        )
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Plantões no mês", int(atual_rel["n_plantoes"]))
-        c2.metric("FDS/Noturno", int(atual_rel["n_fds_ou_noturno"]))
-        c3.metric(
-            "Tempo no nível", f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
-        )
-        c4.metric("Tempo com a CallMed", f"{tempo_de_casa_rel} mês(es)")
-
-        st.markdown("##### Benefícios inclusos")
-        for beneficio in core.beneficios_acumulados(nivel_vestido_rel):
-            st.markdown(f"- {beneficio}")
-
-        if prox_info_rel:
-            partes_rel = []
-            if prox_info_rel["faltam_plantoes"] > 0:
-                partes_rel.append(f"{prox_info_rel['faltam_plantoes']} plantão(ões)")
-            if prox_info_rel["faltam_fds_ou_noturno"] > 0:
-                partes_rel.append(f"{prox_info_rel['faltam_fds_ou_noturno']} plantão(ões) de FDS/noturno")
-            if partes_rel:
-                msg = f"Faltam {' e '.join(partes_rel)} no mês pro {prox_info_rel['proximo_nivel']}"
-                msg += f" ({prox_info_rel['proximo_pct_exibido']}% de aumento)"
-                if prox_info_rel["ganho_extra_estimado"] > 0:
-                    msg += f" — cerca de **{fmt_brl(prox_info_rel['ganho_extra_estimado'])} a mais** de bonificação neste mês."
-                else:
-                    msg += "."
-                st.info(msg)
-            else:
-                st.info(
-                    f"O volume deste mês já sustenta o {prox_info_rel['proximo_nivel']} — o "
-                    "benefício passa a valer após a carência, se mantido nos próximos meses."
-                )
-
-        if len(historico_mensal_rel) >= 2:
-            st.markdown("##### Histórico com a CallMed")
-            hist_chart_df = pd.DataFrame(historico_mensal_rel).set_index("mes")
-            cc1, cc2 = st.columns(2)
-            cc1.bar_chart(hist_chart_df[["n_plantoes"]].rename(columns={"n_plantoes": "Plantões"}))
-            cc2.line_chart(hist_chart_df[["valor"]].rename(columns={"valor": "Valor recebido (R$)"}))
-            st.caption(f"Últimos {len(historico_mensal_rel)} meses — prévia; o PDF traz o gráfico completo.")
-
-        # So os plantoes que CONTARAM pro programa (mesmo escopo que gerou n_plantoes/valor_repasse)
-        # - um plantao excluido (tipo nao-clinico, operacao fora do escopo etc.) nao aparece no PDF
-        # do medico, pra "Total de plantoes" bater exatamente com a soma das linhas listadas.
-        plantoes_contados_rel = plantoes_mes_rel[plantoes_mes_rel["conta_pro_nivel"]].sort_values("data_dt")
-        plantoes_detalhe_rel = [
-            {
-                "data": row["data_dt"].strftime("%d/%m/%Y") if pd.notna(row["data_dt"]) else "—",
-                "operacao": row["operacao"], "tipo": row["tipo"], "valor": row["valor"],
-            }
-            for _, row in plantoes_contados_rel.iterrows()
-        ]
-        pdf_bytes_rel = comunicado_pdf.gerar_pdf_comunicado(
-            nome_medico=nome_rel, mes_ref=mes_relatorio, nivel_vestido=nivel_vestido_rel,
-            n_plantoes=int(atual_rel["n_plantoes"]), n_fds=int(atual_rel["n_fds"]),
-            n_noturno=int(atual_rel["n_noturno"]), pct_aumento_exibido=info_nivel_rel["pct_exibido"],
-            plantoes_detalhe=plantoes_detalhe_rel, valor_total_plantoes=atual_rel["valor_repasse"],
-            valor_bonificacao=atual_rel["custo_aumento_pct_mes"],
-            tempo_no_nivel=tempo_nivel_rel, proximo_nivel_info=prox_info_rel,
-            tempo_de_casa=tempo_de_casa_rel, historico_mensal=historico_mensal_rel,
-        )
-        st.download_button(
-            "📄 Baixar PDF para o médico", data=pdf_bytes_rel,
-            file_name=f"comunicado_{nome_rel.replace(' ', '_')}_{mes_relatorio}.pdf",
-            mime="application/pdf", type="primary",
-        )
-
+    renderizar_relatorio_medico(nome_rel, st.session_state["mes_atual"])
     st.stop()
 
 # ============================================================= PÁGINA: VISÃO GERAL
@@ -879,7 +890,8 @@ filtro_nivel = st.multiselect("Filtrar por nível", [1, 2, 3, 4], key="filtro_ni
 tabela = snap[snap["nivel_vestido"].isin(filtro_nivel)].sort_values(
     ["nivel_vestido", "n_plantoes"], ascending=[False, False]
 )
-st.dataframe(
+st.caption("Clique numa linha pra abrir o relatório completo do médico logo abaixo.")
+evento_tabela_medicos = st.dataframe(
     tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_vestido",
             "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral"]]
     .rename(columns={
@@ -891,7 +903,20 @@ st.dataframe(
     .style.format({"% Aumento": "{:.0f}%", "Valor Plantões": fmt_brl, "Valor Aumento": fmt_brl,
                     "Total Geral": fmt_brl}),
     use_container_width=True, hide_index=True,
+    on_select="rerun", selection_mode="single-row", key="tabela_medicos_select",
 )
+
+# Linha selecionada na tabela acima -> mesmo relatorio completo (abas Sistema/Comunicado + PDF)
+# que a pagina dedicada "📄 Relatório do Médico" mostra - pedido do usuario 2026-08-20, clicar no
+# nome já abre tudo sem precisar trocar de página. Streamlit não tem "duplo-clique" nativo nessa
+# tabela - um clique já seleciona a linha e dispara isso; clicar de novo na mesma linha desmarca.
+linhas_selecionadas_medico = evento_tabela_medicos.selection.rows if evento_tabela_medicos else []
+if linhas_selecionadas_medico:
+    medico_clicado = tabela.iloc[linhas_selecionadas_medico[0]]["medico"]
+    st.markdown("---")
+    with st.container(border=True):
+        st.markdown(f"### 📄 {medico_clicado}")
+        renderizar_relatorio_medico(medico_clicado, mes_ref)
 
 # ---------------------------------------------------------------- CONSULTA POR MÉDICO
 st.markdown("---")
