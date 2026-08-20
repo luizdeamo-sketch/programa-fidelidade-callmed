@@ -127,11 +127,56 @@ def carregar_plantoes(arquivo=None):
     # mas se fosse sabado a noite contaria 1 vez so aqui).
     df["eh_fds_ou_noturno"] = df["eh_fds"] | df["eh_noturno"]
     df["eh_gestao"] = df["tipo"].isin(GESTAO_TIPOS)
+    df["operacao"] = df["local"].apply(operacao_de)
     df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
     df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
     # plantao valido = conta pro volume do nivel: especialidade Anestesia, hospital nao excluido,
-    # e nao e pagamento de gestao/coordenacao (isso conta separado, pra flag de coordenador)
+    # e nao e pagamento de gestao/coordenacao (isso conta separado, pra flag de coordenador). Este
+    # e o padrao default (regex fixo) - a tela "Operacoes" permite substituir hospital_excluido por
+    # uma lista customizada via aplicar_operacoes_customizadas(), sem precisar reler o Excel.
     df["conta_pro_nivel"] = df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
+    return df
+
+
+def operacao_de(local):
+    """Extrai o nome da 'operacao' (hospital/grupo) de um campo Local - mesmo criterio usado no
+    seletor de ramp-up: remove so o ultimo segmento (turno/sub-unidade), ex.: 'Hospital Ana Costa
+    - Centro Cirurgico' -> 'Hospital Ana Costa'."""
+    return str(local or "").rsplit(" - ", 1)[0].strip()
+
+
+def listar_operacoes(df):
+    """Lista as operacoes distintas encontradas na base, com contexto (especialidades vistas,
+    total de linhas, quantas contam hoje pela regra padrao) - usada pela tela de Configuracoes >
+    Operacoes, pra o master validar/ajustar manualmente o que entra no Programa Fidelidade."""
+    if df.empty:
+        return pd.DataFrame(columns=["operacao", "total_linhas", "especialidades", "conta_hoje", "incluida_padrao"])
+    resumo = df.groupby("operacao").agg(
+        total_linhas=("valor", "count"),
+        especialidades=("especialidade", lambda s: ", ".join(sorted(set(s) - {""}))),
+        conta_hoje=("conta_pro_nivel", "sum"),
+    ).reset_index()
+    resumo["incluida_padrao"] = resumo["conta_hoje"] > 0
+    return resumo.sort_values("total_linhas", ascending=False)
+
+
+def operacoes_excluidas_por_padrao(df):
+    """Calcula o conjunto de operacoes que o filtro padrao (EXCLUSAO_HOSPITAL_REGEX) excluiria -
+    usado so pra inicializar a tela de Configuracoes > Operacoes com o estado atual, antes do
+    master customizar qualquer coisa."""
+    if df.empty:
+        return set()
+    return set(df.loc[df["hospital_excluido"], "operacao"].unique())
+
+
+def aplicar_operacoes_customizadas(df, operacoes_excluidas):
+    """Recalcula conta_pro_nivel usando uma lista customizada de operacoes excluidas (definida na
+    tela de Configuracoes > Operacoes) em vez do EXCLUSAO_HOSPITAL_REGEX fixo. Nao mexe no Excel,
+    so reprocessa o dataframe ja carregado - barato, pode rodar a cada mudanca na tela."""
+    df = df.copy()
+    operacoes_excluidas = set(operacoes_excluidas or [])
+    df["operacao_excluida"] = df["operacao"].isin(operacoes_excluidas)
+    df["conta_pro_nivel"] = df["eh_anestesia"] & (~df["operacao_excluida"]) & (~df["eh_gestao"])
     return df
 
 

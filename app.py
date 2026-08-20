@@ -25,15 +25,18 @@ st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", la
 
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Excel)...")
-def carregar_agregado():
-    """Parte lenta (leitura do Excel) - nao depende dos parametros de nivel, so precisa rodar de
-    novo se o Excel mudar."""
-    return core.montar_agregado()
+def carregar_linhas_brutas():
+    """Parte lenta (leitura do Excel) - nao depende de operacoes nem de niveis, so precisa rodar
+    de novo se o Excel mudar."""
+    return core.carregar_plantoes()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def carregar_linhas_brutas():
-    return core.carregar_plantoes()
+def agregar_com_operacoes(df_linhas, operacoes_excluidas_tuple):
+    """Aplica a lista de operacoes excluidas (tela Operacoes) e agrega. Cacheado pela tupla de
+    operacoes excluidas - so recalcula de fato quando o master muda alguma coisa la."""
+    df_ajustado = core.aplicar_operacoes_customizadas(df_linhas, set(operacoes_excluidas_tuple))
+    return core.agregar_mensal(df_ajustado)
 
 
 @st.cache_data(ttl=3600, show_spinner="Recalculando níveis com os parâmetros atuais...")
@@ -79,22 +82,71 @@ eh_master = usuario["papel"] in usuarios.PAPEIS_COM_ACAO_SENSIVEL
 if "niveis_custom" not in st.session_state:
     st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
 
-agg = carregar_agregado()
+df_linhas = carregar_linhas_brutas()
+if "operacoes_excluidas" not in st.session_state:
+    st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
+
+agg = agregar_com_operacoes(df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])))
 niveis_df = calcular_niveis_cached(agg, niveis_para_json(st.session_state["niveis_custom"]))
 if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")
     st.stop()
 
-col_titulo, col_user = st.columns([4, 1])
-with col_titulo:
-    st.title("⭐ Programa Fidelidade CallMed — Constelação")
-    st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
-with col_user:
+with st.sidebar:
     st.markdown(f"**{usuario['nome']}**")
     st.caption(f"Papel: {usuario['papel']}")
     if st.button("Sair"):
         del st.session_state["usuario"]
         st.rerun()
+    st.markdown("---")
+    pagina = st.radio("Navegação", ["📊 Visão Geral", "🏥 Operações"], label_visibility="collapsed")
+
+st.title("⭐ Programa Fidelidade CallMed — Constelação")
+st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
+
+# ============================================================= PÁGINA: OPERAÇÕES
+if pagina == "🏥 Operações":
+    st.subheader("🏥 Operações que contam pro Programa Fidelidade")
+    st.caption(
+        "Cada linha é um hospital/operação (mesmo agrupamento usado no bônus de ramp-up). "
+        "Desmarcar uma operação tira TODOS os plantões dela da contagem de nível dos médicos — "
+        "afeta o histórico inteiro, não só o mês atual."
+    )
+    if st.session_state.pop("sucesso_operacoes", False):
+        st.success("Lista de operações aplicada — histórico recalculado.")
+
+    resumo_op = core.listar_operacoes(df_linhas)
+    resumo_op["Incluída"] = ~resumo_op["operacao"].isin(st.session_state["operacoes_excluidas"])
+    tabela_op = resumo_op[["operacao", "especialidades", "total_linhas", "conta_hoje", "Incluída"]].rename(
+        columns={"operacao": "Operação", "especialidades": "Especialidades vistas",
+                 "total_linhas": "Total de linhas", "conta_hoje": "Contam hoje"}
+    )
+
+    if eh_master:
+        tabela_editada = st.data_editor(
+            tabela_op, use_container_width=True, hide_index=True, key="editor_operacoes",
+            disabled=["Operação", "Especialidades vistas", "Total de linhas", "Contam hoje"],
+            column_config={"Incluída": st.column_config.CheckboxColumn(
+                help="Desmarque para excluir essa operação inteira do Programa Fidelidade."
+            )},
+        )
+        if st.button("✅ Aplicar mudanças e recalcular", type="primary"):
+            novas_excluidas = set(
+                tabela_editada.loc[~tabela_editada["Incluída"], "Operação"]
+            )
+            st.session_state["operacoes_excluidas"] = novas_excluidas
+            st.session_state["sucesso_operacoes"] = True
+            st.rerun()
+        if st.button("↩️ Restaurar padrão (Mário Covas e Amhemed fora)"):
+            st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
+            st.rerun()
+    else:
+        st.caption("Somente leitura — edição é exclusiva do papel master.")
+        st.dataframe(tabela_op, use_container_width=True, hide_index=True)
+
+    st.stop()
+
+# ============================================================= PÁGINA: VISÃO GERAL
 
 # ---------------------------------------------------------------- FONTE DE DADOS (upload)
 with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
@@ -114,8 +166,8 @@ with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
                 os.makedirs(cfg.UPLOAD_DIR, exist_ok=True)
                 with open(cfg.UPLOAD_PLANTOES, "wb") as f:
                     f.write(novo_arquivo.getbuffer())
-                carregar_agregado.clear()
                 carregar_linhas_brutas.clear()
+                agregar_com_operacoes.clear()
                 calcular_niveis_cached.clear()
                 st.success("Arquivo salvo — recarregando com os dados novos.")
                 st.rerun()
@@ -334,13 +386,10 @@ if not eh_master:
         f"você pode simular o custo abaixo, mas não pode confirmar o disparo real."
     )
 
-df_raw_hosp = carregar_linhas_brutas()
-hospitais_disponiveis = sorted(
-    df_raw_hosp["local"].str.rsplit(" - ", n=1).str[0].str.strip().unique()
-)
+hospitais_disponiveis = sorted(df_linhas["operacao"].unique())
 hosp_sel = st.selectbox("Hospital/operação em ramp-up", [""] + hospitais_disponiveis)
 if hosp_sel:
-    janela = df_raw_hosp[df_raw_hosp["local"].str.startswith(hosp_sel, na=False)]
+    janela = df_linhas[df_linhas["operacao"] == hosp_sel]
     meses_disp = sorted(janela["anomes"].unique(), reverse=True)[:6]
     meses_sel = st.multiselect("Meses do ramp-up (normalmente 3 meses seguidos)", meses_disp, default=meses_disp[:3])
     if meses_sel:
