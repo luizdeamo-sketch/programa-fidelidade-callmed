@@ -206,10 +206,11 @@ def resumo_locais_para_apoio(df_linhas, apoio_df):
     return tabela.sort_values(["classificado", "total_linhas"], ascending=[True, False])
 
 
-def carregar_plantoes(arquivo=None, apoio_df=None):
-    """Le a base BD de plantoes (aba 'BD', formato "1.ANALISES LUIZ": colunas deslocadas +1 em
-    relacao ao arquivo antigo do Desktop, com a coluna extra 'Especialidade' no fim) e retorna
-    DataFrame linha-a-linha com os flags de elegibilidade ja calculados (nao agregado ainda)."""
+def _ler_plantoes_excel(arquivo=None):
+    """So a leitura crua do Excel (aba 'BD', formato "1.ANALISES LUIZ") - retorna DataFrame com
+    as colunas base (anomes/medico/data_raw/local/tipo/especialidade_bd/valor), sem nenhum flag
+    de elegibilidade calculado ainda. Ver enriquecer_plantoes() pro resto do pipeline - separado
+    pra poder trocar a FONTE (Excel local vs Supabase) sem duplicar a logica de enriquecimento."""
     arquivo = arquivo or cfg.resolver_base_plantoes()
     wb = load_workbook(arquivo, data_only=True, read_only=True)
     ws = wb["BD"]
@@ -237,9 +238,17 @@ def carregar_plantoes(arquivo=None, apoio_df=None):
             "valor": float(valor),
         })
     wb.close()
-    df = pd.DataFrame(linhas)
+    return pd.DataFrame(linhas)
+
+
+def enriquecer_plantoes(df, apoio_df=None, arquivo=None):
+    """Recebe o DataFrame CRU (colunas anomes/medico/data_raw/local/tipo/especialidade_bd/valor -
+    de _ler_plantoes_excel() OU de consultar_plantoes_supabase()) e calcula todos os flags de
+    elegibilidade (FDS/noturno, gestao, tipo nao-clinico, operacao/especialidade via Apoio,
+    conta_pro_nivel). Compartilhado pelas duas fontes de dados, pra nao duplicar a regra."""
     if df.empty:
         return df
+    df = df.copy()
     df["data_dt"] = pd.to_datetime(df["data_raw"], dayfirst=True, errors="coerce")
     # FDS = Sabado e Domingo (sexta NAO conta mais - mudanca de regra confirmada pelo usuario,
     # sessao 2026-08-20, ver Programa_Constelacao_CallMed_v2.md).
@@ -294,6 +303,138 @@ def carregar_plantoes(arquivo=None, apoio_df=None):
         & (~df["eh_tipo_nao_clinico"])
     )
     return df
+
+
+def carregar_plantoes(arquivo=None, apoio_df=None):
+    """Le a base de plantoes do EXCEL local (aba 'BD') e ja enriquece. Mantida como caminho de
+    fallback/offline (scripts, migracao) - a tela do sistema usa consultar_plantoes_supabase()
+    desde 2026-08-20 (le do Supabase, nao depende mais de acesso a maquina/OneDrive)."""
+    df_cru = _ler_plantoes_excel(arquivo)
+    return enriquecer_plantoes(df_cru, apoio_df=apoio_df, arquivo=arquivo)
+
+
+_PAGINA_SUPABASE = 1000
+
+
+def consultar_plantoes_supabase(client, apoio_df=None):
+    """Le a base de plantoes inteira do Supabase (tabela public.plantoes, paginada de 1000 em
+    1000 - limite padrao do PostgREST) e ja enriquece. Fonte PRINCIPAL desde 2026-08-20 - o
+    sistema para de depender do Excel local/OneDrive pra rodar (pedido do usuario: "não dependo
+    de consulta na máquina"). 'client' e o objeto supabase-py (ver supabase_client.get_client())."""
+    linhas = []
+    offset = 0
+    while True:
+        resposta = (
+            client.table("plantoes")
+            .select("anomes,medico,data_raw,local,tipo,especialidade_bd,valor")
+            .order("id")  # obrigatorio pra paginacao estavel - sem ORDER BY o Postgres nao
+            # garante ordem consistente entre paginas, o que pode pular ou duplicar linha
+            .range(offset, offset + _PAGINA_SUPABASE - 1)
+            .execute()
+        )
+        pagina = resposta.data
+        if not pagina:
+            break
+        linhas.extend(pagina)
+        if len(pagina) < _PAGINA_SUPABASE:
+            break
+        offset += _PAGINA_SUPABASE
+    df_cru = pd.DataFrame(linhas)
+    if not df_cru.empty:
+        # data_raw volta do Supabase ja em ISO (yyyy-mm-ddThh:mm:ss), inequivoco - NAO pode
+        # passar por dayfirst=True de novo dentro de enriquecer_plantoes() (que existe pro
+        # formato textual "dd/mm/aaaa hh:mm" do Excel), senao mes/dia trocam de lugar quando os
+        # dois sao <=12 (ex.: 2023-04-01 vira 2023-01-04) ou a data falha o parse inteira (bug
+        # real encontrado e corrigido em 2026-08-20). Convertendo aqui pra Timestamp de verdade
+        # ANTES, o pd.to_datetime(dayfirst=True) la dentro vira passthrough (input ja e
+        # datetime64, dayfirst e ignorado nesse caso).
+        df_cru["data_raw"] = pd.to_datetime(df_cru["data_raw"], errors="coerce")
+    return enriquecer_plantoes(df_cru, apoio_df=apoio_df)
+
+
+def consultar_apoio_supabase(client):
+    """Le o mapeamento Local -> Setor/Especialidade da tabela public.apoio do Supabase - versao
+    GERENCIADA PELO SISTEMA (substitui carregar_apoio_customizado()/resolver_apoio() locais desde
+    a migracao pro Supabase, 2026-08-20)."""
+    resposta = client.table("apoio").select("local,coordenador,setor_definido,especialidade").execute()
+    apoio = pd.DataFrame(resposta.data)
+    if apoio.empty:
+        return pd.DataFrame(columns=_COLUNAS_APOIO)
+    return apoio.rename(columns={"especialidade": "especialidade_apoio"})[_COLUNAS_APOIO]
+
+
+def salvar_apoio_supabase(client, apoio_df):
+    """Grava o mapeamento Local -> Setor/Especialidade editado na tela '🗂️ Apoio' de volta no
+    Supabase (upsert por 'local', a chave primaria da tabela)."""
+    registros = apoio_df.rename(columns={"especialidade_apoio": "especialidade"})[
+        ["local", "coordenador", "setor_definido", "especialidade"]
+    ].to_dict("records")
+    for i in range(0, len(registros), 500):
+        client.table("apoio").upsert(registros[i:i + 500], on_conflict="local").execute()
+
+
+def enviar_planilha_supabase(client, arquivo_upload):
+    """Le uma planilha (upload do master, cobrindo qualquer periodo - nao precisa ser a base
+    inteira) e faz UPSERT no Supabase, usando a chave (medico, data_raw, local, tipo, valor) pra
+    decidir se cada linha e nova ou ja existia (mesma linha de novo = sobreposicao, so confirma o
+    que ja tinha; combinacao nova = incluida). Pedido do usuario: "eu mando os dados via upload de
+    uma planilha de um período que eu desejar e você avalia se tem sobreposição ou se inclui dados
+    novos".
+
+    Retorna um resumo (dict) pra tela mostrar pro master: quantas linhas vieram na planilha, quais
+    meses ela cobre, quantas ja existiam no banco pra esses meses (antes do envio) e quantas
+    existem depois - a diferenca e quanto foi realmente adicionado."""
+    df_cru = _ler_plantoes_excel(arquivo_upload)
+    if df_cru.empty:
+        return {"linhas_enviadas": 0, "meses": [], "existentes_antes": 0, "existentes_depois": 0, "novas": 0}
+
+    meses = sorted(df_cru["anomes"].unique())
+
+    def _contar_existentes(meses):
+        total = 0
+        for mes in meses:
+            resp = (
+                client.table("plantoes").select("id", count="exact")
+                .eq("anomes", mes).limit(1).execute()
+            )
+            total += resp.count or 0
+        return total
+
+    existentes_antes = _contar_existentes(meses)
+
+    registros = df_cru.copy()
+    # "mes"/"ano" nao vem de _ler_plantoes_excel() (que so tem "anomes" combinado) mas a tabela
+    # exige os dois (not null) - deriva de volta a partir de anomes ("aaaa-mm").
+    registros["ano"] = registros["anomes"].str[:4].astype(int)
+    registros["mes"] = registros["anomes"].str[5:7].astype(int)
+    # data_raw normalmente vem como TEXTO ("dd/mm/aaaa hh:mm"), nao datetime nativo - mesmo
+    # parsing de enriquecer_plantoes() (dayfirst=True), senao a data se perde (bug ja visto e
+    # corrigido na migracao inicial de 2026-08-20).
+    registros["data_raw"] = pd.to_datetime(
+        registros["data_raw"], dayfirst=True, errors="coerce"
+    ).apply(lambda d: d.isoformat() if pd.notna(d) else None)
+    # Duplicata exata nos 5 campos da chave DENTRO do proprio upload derruba o upsert (Postgres
+    # nao deixa um UPSERT afetar a mesma linha 2x no mesmo comando) - risco aceito pelo usuario ao
+    # escolher essa chave, mantem so a 1a ocorrencia.
+    registros = registros.drop_duplicates(
+        subset=["medico", "data_raw", "local", "tipo", "valor"], keep="first"
+    )
+    registros = registros.to_dict("records")
+    for i in range(0, len(registros), 2000):
+        lote = registros[i:i + 2000]
+        client.table("plantoes").upsert(
+            lote, on_conflict="medico,data_raw,local,tipo,valor"
+        ).execute()
+
+    existentes_depois = _contar_existentes(meses)
+
+    return {
+        "linhas_enviadas": len(df_cru),
+        "meses": meses,
+        "existentes_antes": existentes_antes,
+        "existentes_depois": existentes_depois,
+        "novas": existentes_depois - existentes_antes,
+    }
 
 
 def operacao_de(local):

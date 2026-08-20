@@ -11,31 +11,31 @@ trocar as senhas em usuarios.py e, se for para produção real, migrar para algo
 Lovable já discutida.
 """
 import copy
-import datetime as dt
 import io
 import json
-import os
 
 import streamlit as st
 import pandas as pd
 import core
-import config_caminhos as cfg
 import usuarios
 import comunicado_pdf
+import supabase_client
 
 st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", layout="wide")
 
 
-@st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Excel)...")
+@st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Supabase)...")
 def carregar_linhas_brutas(apoio_json):
-    """Parte lenta (leitura do Excel) - cacheada tambem pelo JSON do mapeamento Apoio (tela '🗂️
-    Apoio'), entao so recalcula de fato quando o Excel muda OU o master edita alguma
-    classificacao la."""
+    """Le a base de plantoes inteira do Supabase - nao depende mais de acesso a maquina/OneDrive
+    (migracao 2026-08-20). Cacheada tambem pelo JSON do mapeamento Apoio (tela '🗂️ Apoio'), entao
+    so recalcula de fato quando o master edita uma classificacao ou depois de um novo upload (ver
+    'Fonte de dados', que limpa esse cache)."""
     if apoio_json and apoio_json != "[]":
         apoio_df = pd.read_json(io.StringIO(apoio_json))
     else:
         apoio_df = pd.DataFrame(columns=["local", "coordenador", "setor_definido", "especialidade_apoio"])
-    return core.carregar_plantoes(apoio_df=apoio_df)
+    client = supabase_client.get_client()
+    return core.consultar_plantoes_supabase(client, apoio_df=apoio_df)
 
 
 def apoio_para_json(apoio_df):
@@ -102,9 +102,8 @@ eh_master = usuario["papel"] in usuarios.PAPEIS_COM_ACAO_SENSIVEL
 if "niveis_custom" not in st.session_state:
     st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
 if "apoio_custom" not in st.session_state:
-    # resolver_apoio() decide: se ja existe versao gerenciada pelo sistema (persistida pela tela
-    # '🗂️ Apoio'), usa ela - senao importa da aba Apoio do Excel uma unica vez (bootstrap).
-    st.session_state["apoio_custom"] = core.resolver_apoio()
+    # Le do Supabase (tabela public.apoio) - fonte de verdade desde a migracao 2026-08-20.
+    st.session_state["apoio_custom"] = core.consultar_apoio_supabase(supabase_client.get_client())
 
 df_linhas = carregar_linhas_brutas(apoio_para_json(st.session_state["apoio_custom"]))
 if "operacoes_excluidas" not in st.session_state:
@@ -180,7 +179,7 @@ with st.sidebar:
     pagina = st.radio(
         "Navegação",
         ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
-         "📄 Relatório do Médico", "🗂️ Apoio (Local → Especialidade)"],
+         "📄 Relatório do Médico", "🗂️ Apoio (Local → Especialidade)", "🗄️ Base de Plantões"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -197,34 +196,93 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ---------------------------------------------------------- FONTE DE DADOS (upload)
+    # ---------------------------------------------------------- FONTE DE DADOS (upload + mesclagem)
     with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
-        usando_upload = os.path.exists(cfg.UPLOAD_PLANTOES)
-        if usando_upload:
-            ts = dt.datetime.fromtimestamp(os.path.getmtime(cfg.UPLOAD_PLANTOES))
-            st.caption(f"Usando arquivo enviado em {ts.strftime('%d/%m/%Y %H:%M')}.")
-        else:
-            st.caption(f"Usando caminho local (só funciona rodando na máquina com OneDrive sincronizado).")
+        st.caption(
+            f"Base no Supabase — {len(df_linhas):,} plantões, {meses_disponiveis[0]} a "
+            f"{meses_disponiveis[-1]}. Não depende mais de acesso à máquina/OneDrive; pra "
+            "atualizar, envie uma planilha de qualquer período — o sistema identifica sozinho o "
+            "que já existe (sobreposição, mantido) e o que é novo (incluído)."
+        )
+        resumo_envio = st.session_state.pop("resumo_envio_planilha", None)
+        if resumo_envio:
+            st.success(
+                f"Planilha processada: {resumo_envio['linhas_enviadas']:,} linha(s) enviada(s), "
+                f"cobrindo {', '.join(resumo_envio['meses'])}. "
+                f"**{resumo_envio['novas']:,} nova(s)** incluída(s) — "
+                f"{resumo_envio['existentes_antes']:,} já existiam nesses meses antes do envio "
+                "(sobreposição, mantidas sem duplicar)."
+            )
 
         if eh_master:
             novo_arquivo = st.file_uploader(
-                "Enviar novo Excel de plantões (mesmo formato da aba 'BD')", type=["xlsx"]
+                "Enviar planilha de plantões (mesmo formato da aba 'BD', qualquer período)",
+                type=["xlsx"],
             )
             if novo_arquivo is not None:
-                if st.button("📤 Confirmar envio e recarregar"):
-                    os.makedirs(cfg.UPLOAD_DIR, exist_ok=True)
-                    with open(cfg.UPLOAD_PLANTOES, "wb") as f:
-                        f.write(novo_arquivo.getbuffer())
+                if st.button("📤 Enviar e mesclar"):
+                    with st.spinner("Lendo a planilha e comparando com o que já está no banco..."):
+                        resumo = core.enviar_planilha_supabase(supabase_client.get_client(), novo_arquivo)
+                    st.session_state["resumo_envio_planilha"] = resumo
                     carregar_linhas_brutas.clear()
                     agregar_com_operacoes.clear()
                     calcular_niveis_cached.clear()
-                    st.success("Arquivo salvo — recarregando com os dados novos.")
                     st.rerun()
         else:
             st.caption("Envio de novo arquivo é exclusivo do papel master.")
 
 st.title("⭐ Programa Fidelidade CallMed — Constelação")
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
+
+# ============================================================= PÁGINA: BASE DE PLANTÕES
+if pagina == "🗄️ Base de Plantões":
+    st.subheader("🗄️ Base de Plantões")
+    st.caption(
+        f"Visibilidade direta da base bruta (Supabase, tabela 'plantoes') — "
+        f"{len(df_linhas):,} linhas, de {meses_disponiveis[0]} a {meses_disponiveis[-1]}, "
+        f"{df_linhas['medico'].nunique():,} médicos distintos."
+    )
+
+    fc1, fc2, fc3 = st.columns(3)
+    opcoes_mes_bd = ["Todos os meses"] + meses_disponiveis
+    filtro_mes_bd = fc1.selectbox("Mês", opcoes_mes_bd, index=len(opcoes_mes_bd) - 1)
+    filtro_medico_bd = fc2.text_input("Médico contém")
+    filtro_local_bd = fc3.text_input("Operação/Local contém")
+
+    tabela_bd = df_linhas
+    if filtro_mes_bd != "Todos os meses":
+        tabela_bd = tabela_bd[tabela_bd["anomes"] == filtro_mes_bd]
+    if filtro_medico_bd:
+        tabela_bd = tabela_bd[tabela_bd["medico"].str.contains(filtro_medico_bd, case=False, na=False)]
+    if filtro_local_bd:
+        tabela_bd = tabela_bd[
+            tabela_bd["operacao"].str.contains(filtro_local_bd, case=False, na=False)
+            | tabela_bd["local"].str.contains(filtro_local_bd, case=False, na=False)
+        ]
+
+    st.caption(f"{len(tabela_bd):,} linha(s) encontrada(s).")
+    if len(tabela_bd) > 5000:
+        st.warning(
+            "Mais de 5.000 linhas — refine os filtros pra uma visualização mais rápida (o "
+            "download em CSV, no canto da tabela, traz tudo mesmo assim)."
+        )
+
+    st.dataframe(
+        tabela_bd[["data_dt", "medico", "operacao", "especialidade", "tipo", "valor",
+                   "especialidade_bd", "conta_pro_nivel"]]
+        .sort_values("data_dt", ascending=False)
+        .rename(columns={
+            "data_dt": "Data", "medico": "Médico", "operacao": "Operação",
+            "especialidade": "Especialidade", "tipo": "Tipo", "valor": "Valor",
+            "especialidade_bd": "Especialidade (original)", "conta_pro_nivel": "Conta pro nível",
+        })
+        .style.format({
+            "Valor": fmt_brl,
+            "Data": lambda d: d.strftime("%d/%m/%Y %H:%M") if pd.notna(d) else "—",
+        }),
+        use_container_width=True, hide_index=True, height=600,
+    )
+    st.stop()
 
 # ============================================================= PÁGINA: APOIO
 if pagina == "🗂️ Apoio (Local → Especialidade)":
@@ -265,19 +323,22 @@ if pagina == "🗂️ Apoio (Local → Especialidade)":
                 "Local (original)": "local", "Coordenador": "coordenador",
                 "Setor Definido (operação)": "setor_definido", "Especialidade": "especialidade_apoio",
             })[["local", "coordenador", "setor_definido", "especialidade_apoio"]]
-            core.salvar_apoio_customizado(novo_apoio)
+            core.salvar_apoio_supabase(supabase_client.get_client(), novo_apoio)
             st.session_state["apoio_custom"] = novo_apoio
             st.session_state["sucesso_apoio"] = True
             st.rerun()
-        if cbtn2.button("↩️ Restaurar da planilha (aba Apoio do Excel)"):
+        if cbtn2.button(
+            "↩️ Reimportar da planilha local (só funciona rodando na máquina com OneDrive)"
+        ):
             apoio_planilha = core.carregar_apoio()
-            core.salvar_apoio_customizado(apoio_planilha)
+            core.salvar_apoio_supabase(supabase_client.get_client(), apoio_planilha)
             st.session_state["apoio_custom"] = apoio_planilha
             st.session_state["sucesso_apoio"] = True
             st.rerun()
         st.caption(
             "O recálculo roda o histórico inteiro de novo — afeta nível, carência e o valor de "
-            "aumento pago a todos os médicos que passam por esses Locais."
+            "aumento pago a todos os médicos que passam por esses Locais. Mudanças aqui gravam "
+            "direto no Supabase (tabela 'apoio'), visível pra qualquer um que acessar o sistema."
         )
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")

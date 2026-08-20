@@ -1,4 +1,11 @@
-"""Caminhos de dados do Programa Fidelidade CallMed (Constelação) - sistema separado do DRE."""
+"""Caminhos de dados do Programa Fidelidade CallMed (Constelação) - sistema separado do DRE.
+
+DESDE 2026-08-20: a fonte PRINCIPAL de dados (plantoes + Apoio) e o Supabase (ver
+supabase_client.py e core.consultar_plantoes_supabase()/consultar_apoio_supabase()), nao mais o
+Excel local/OneDrive - o sistema deixou de depender de acesso a maquina pra funcionar. Os caminhos
+abaixo (BASE_PLANTOES, UPLOAD_PLANTOES, APOIO_CUSTOMIZADO) continuam existindo so como caminho de
+FALLBACK/OFFLINE (scripts, migracao, o botao "Reimportar da planilha local" da tela Apoio) - nao
+sao mais lidos automaticamente pelo app.py."""
 import os
 
 # Pasta-base do projeto migrada do Desktop para o OneDrive em 2026-08-19 (sessao do usuario).
