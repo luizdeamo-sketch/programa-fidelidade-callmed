@@ -92,6 +92,27 @@ if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")
     st.stop()
 
+meses_disponiveis = sorted(niveis_df["anomes"].unique())
+# "slider_mes" e a UNICA fonte de verdade do mes selecionado (mesmo key do widget). Os botoes
+# Anterior/Seguinte SO PODEM mudar esse session_state via on_click (callback roda ANTES do
+# widget ser reinstanciado no proximo run) - setar direto dentro do "if st.button(...):" quebra
+# com StreamlitAPIException ("cannot be modified after the widget... is instantiated"), porque
+# nesse ponto o select_slider da MESMA execucao ja rodou antes. Bug real encontrado e corrigido
+# em 2026-08-20 (tentativas anteriores com value= e com set direto no if-button falharam).
+if (
+    "slider_mes" not in st.session_state
+    or st.session_state["slider_mes"] not in meses_disponiveis
+):
+    st.session_state["slider_mes"] = meses_disponiveis[-1]
+
+
+def _ir_mes(delta):
+    idx = meses_disponiveis.index(st.session_state["slider_mes"])
+    novo_idx = idx + delta
+    if 0 <= novo_idx < len(meses_disponiveis):
+        st.session_state["slider_mes"] = meses_disponiveis[novo_idx]
+
+
 with st.sidebar:
     st.markdown(f"**{usuario['nome']}**")
     st.caption(f"Papel: {usuario['papel']}")
@@ -100,6 +121,127 @@ with st.sidebar:
         st.rerun()
     st.markdown("---")
     pagina = st.radio("Navegação", ["📊 Visão Geral", "🏥 Operações"], label_visibility="collapsed")
+    st.markdown("---")
+
+    st.select_slider("📅 Navegar por mês", options=meses_disponiveis, key="slider_mes")
+    idx_atual = meses_disponiveis.index(st.session_state["slider_mes"])
+    mcol1, mcol2 = st.columns(2)
+    with mcol1:
+        st.button("← Anterior", disabled=(idx_atual == 0), use_container_width=True,
+                   on_click=_ir_mes, args=(-1,))
+    with mcol2:
+        st.button("Seguinte →", disabled=(idx_atual == len(meses_disponiveis) - 1), use_container_width=True,
+                   on_click=_ir_mes, args=(1,))
+
+    st.markdown("---")
+
+    # ---------------------------------------------------------- FONTE DE DADOS (upload)
+    with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
+        usando_upload = os.path.exists(cfg.UPLOAD_PLANTOES)
+        if usando_upload:
+            ts = dt.datetime.fromtimestamp(os.path.getmtime(cfg.UPLOAD_PLANTOES))
+            st.caption(f"Usando arquivo enviado em {ts.strftime('%d/%m/%Y %H:%M')}.")
+        else:
+            st.caption(f"Usando caminho local (só funciona rodando na máquina com OneDrive sincronizado).")
+
+        if eh_master:
+            novo_arquivo = st.file_uploader(
+                "Enviar novo Excel de plantões (mesmo formato da aba 'BD')", type=["xlsx"]
+            )
+            if novo_arquivo is not None:
+                if st.button("📤 Confirmar envio e recarregar"):
+                    os.makedirs(cfg.UPLOAD_DIR, exist_ok=True)
+                    with open(cfg.UPLOAD_PLANTOES, "wb") as f:
+                        f.write(novo_arquivo.getbuffer())
+                    carregar_linhas_brutas.clear()
+                    agregar_com_operacoes.clear()
+                    calcular_niveis_cached.clear()
+                    st.success("Arquivo salvo — recarregando com os dados novos.")
+                    st.rerun()
+        else:
+            st.caption("Envio de novo arquivo é exclusivo do papel master.")
+
+    # ---------------------------------------------------------- CONFIGURAÇÕES DO PROGRAMA
+    _tem_mensagem_pendente = st.session_state.get("sucesso_config", False)
+    with st.expander(
+        "⚙️ Configurações do programa (níveis, carência, % de aumento)",
+        expanded=_tem_mensagem_pendente,
+    ):
+        if not eh_master:
+            st.caption("Somente leitura — edição é exclusiva do papel master.")
+
+        if st.session_state.pop("sucesso_config", False):
+            st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
+        if st.session_state.pop("avisos_config", None):
+            for a in st.session_state.get("_avisos_pendentes", []):
+                st.warning(a)
+            st.caption("Mesmo assim, os parâmetros foram salvos e recalculados — ajuste os limites se não era essa a intenção.")
+
+        linhas_config = []
+        for n in st.session_state["niveis_custom"]:
+            linhas_config.append({
+                "Nível": n["idx"],
+                "Mín. plantões": n["min_plantoes"],
+                "Máx. plantões (vazio = sem limite)": n["max_plantoes"],
+                "Mín. FDS+Noturno": n["min_fds"],
+                "Carência (meses)": n["carencia_meses"],
+                "% aumento no plantão": round(n["pct_aumento"] * 100, 2),
+            })
+        df_config = pd.DataFrame(linhas_config).set_index("Nível")
+
+        if eh_master:
+            df_editado = st.data_editor(
+                df_config, use_container_width=True, key="editor_niveis",
+                column_config={
+                    "Máx. plantões (vazio = sem limite)": st.column_config.NumberColumn(
+                        help="Deixe vazio no Nível 4 para representar '20 ou mais, sem teto'."
+                    ),
+                    "% aumento no plantão": st.column_config.NumberColumn(
+                        help="Em %, ex.: 2.75 para 2,75%", format="%.2f",
+                    ),
+                },
+            )
+            cbtn1, cbtn2 = st.columns(2)
+            if cbtn1.button("✅ Aplicar", type="primary"):
+                novos_niveis = []
+                for idx, row in df_editado.iterrows():
+                    maximo = row["Máx. plantões (vazio = sem limite)"]
+                    novos_niveis.append({
+                        "idx": int(idx),
+                        "nome": f"Nível {int(idx)}",
+                        "min_plantoes": int(row["Mín. plantões"]),
+                        "max_plantoes": None if pd.isna(maximo) else int(maximo),
+                        "min_fds": int(row["Mín. FDS+Noturno"]),
+                        "carencia_meses": int(row["Carência (meses)"]),
+                        "pct_aumento": float(row["% aumento no plantão"]) / 100,
+                        "pct_exibido": round(float(row["% aumento no plantão"])),
+                        "tem_seguro": int(idx) >= 3,
+                    })
+                novos_niveis.sort(key=lambda n: n["idx"])
+                avisos = []
+                for i in range(len(novos_niveis) - 1):
+                    atual, prox = novos_niveis[i], novos_niveis[i + 1]
+                    maximo_atual = atual["max_plantoes"]
+                    if maximo_atual is None or maximo_atual + 1 != prox["min_plantoes"]:
+                        avisos.append(
+                            f"Entre Nível {atual['idx']} (máx. {maximo_atual}) e Nível {prox['idx']} "
+                            f"(mín. {prox['min_plantoes']}) há uma lacuna ou sobreposição — médicos "
+                            f"nesse intervalo vão cair no Nível 1 por padrão, sem aviso."
+                        )
+                st.session_state["_avisos_pendentes"] = avisos
+                st.session_state["avisos_config"] = bool(avisos)
+                st.session_state["sucesso_config"] = True
+                st.session_state["niveis_custom"] = novos_niveis
+                st.rerun()
+            if cbtn2.button("↩️ Restaurar padrão"):
+                st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
+                st.rerun()
+            st.caption(
+                "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta "
+                "carência e, portanto, todos os meses navegáveis, não só o mês selecionado)."
+            )
+        else:
+            st.dataframe(df_config, use_container_width=True)
 
 st.title("⭐ Programa Fidelidade CallMed — Constelação")
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
@@ -148,144 +290,7 @@ if pagina == "🏥 Operações":
 
 # ============================================================= PÁGINA: VISÃO GERAL
 
-# ---------------------------------------------------------------- FONTE DE DADOS (upload)
-with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
-    usando_upload = os.path.exists(cfg.UPLOAD_PLANTOES)
-    if usando_upload:
-        ts = dt.datetime.fromtimestamp(os.path.getmtime(cfg.UPLOAD_PLANTOES))
-        st.caption(f"Usando arquivo enviado em {ts.strftime('%d/%m/%Y %H:%M')}.")
-    else:
-        st.caption(f"Usando caminho local: `{cfg.BASE_PLANTOES}` (só funciona rodando na máquina com OneDrive sincronizado).")
-
-    if eh_master:
-        novo_arquivo = st.file_uploader(
-            "Enviar novo Excel de plantões (mesmo formato da aba 'BD')", type=["xlsx"]
-        )
-        if novo_arquivo is not None:
-            if st.button("📤 Confirmar envio e recarregar"):
-                os.makedirs(cfg.UPLOAD_DIR, exist_ok=True)
-                with open(cfg.UPLOAD_PLANTOES, "wb") as f:
-                    f.write(novo_arquivo.getbuffer())
-                carregar_linhas_brutas.clear()
-                agregar_com_operacoes.clear()
-                calcular_niveis_cached.clear()
-                st.success("Arquivo salvo — recarregando com os dados novos.")
-                st.rerun()
-    else:
-        st.caption("Envio de novo arquivo é exclusivo do papel master.")
-
-# ---------------------------------------------------------------- CONFIGURAÇÕES DO PROGRAMA
-_tem_mensagem_pendente = st.session_state.get("sucesso_config", False)
-with st.expander(
-    "⚙️ Configurações do programa (níveis, carência, % de aumento)",
-    expanded=_tem_mensagem_pendente,
-):
-    if not eh_master:
-        st.caption("Somente leitura — edição é exclusiva do papel master.")
-
-    if st.session_state.pop("sucesso_config", False):
-        st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
-    if st.session_state.pop("avisos_config", None):
-        for a in st.session_state.get("_avisos_pendentes", []):
-            st.warning(a)
-        st.caption("Mesmo assim, os parâmetros foram salvos e recalculados — ajuste os limites se não era essa a intenção.")
-
-    linhas_config = []
-    for n in st.session_state["niveis_custom"]:
-        linhas_config.append({
-            "Nível": n["idx"],
-            "Mín. plantões": n["min_plantoes"],
-            "Máx. plantões (vazio = sem limite)": n["max_plantoes"],
-            "Mín. FDS+Noturno": n["min_fds"],
-            "Carência (meses)": n["carencia_meses"],
-            "% aumento no plantão": round(n["pct_aumento"] * 100, 2),
-        })
-    df_config = pd.DataFrame(linhas_config).set_index("Nível")
-
-    if eh_master:
-        df_editado = st.data_editor(
-            df_config, use_container_width=True, key="editor_niveis",
-            column_config={
-                "Máx. plantões (vazio = sem limite)": st.column_config.NumberColumn(
-                    help="Deixe vazio no Nível 4 para representar '20 ou mais, sem teto'."
-                ),
-                "% aumento no plantão": st.column_config.NumberColumn(
-                    help="Em %, ex.: 2.75 para 2,75%", format="%.2f",
-                ),
-            },
-        )
-        cbtn1, cbtn2 = st.columns(2)
-        if cbtn1.button("✅ Aplicar mudanças e recalcular", type="primary"):
-            novos_niveis = []
-            for idx, row in df_editado.iterrows():
-                maximo = row["Máx. plantões (vazio = sem limite)"]
-                novos_niveis.append({
-                    "idx": int(idx),
-                    "nome": f"Nível {int(idx)}",
-                    "min_plantoes": int(row["Mín. plantões"]),
-                    "max_plantoes": None if pd.isna(maximo) else int(maximo),
-                    "min_fds": int(row["Mín. FDS+Noturno"]),
-                    "carencia_meses": int(row["Carência (meses)"]),
-                    "pct_aumento": float(row["% aumento no plantão"]) / 100,
-                    "pct_exibido": round(float(row["% aumento no plantão"])),
-                    "tem_seguro": int(idx) >= 3,
-                })
-            novos_niveis.sort(key=lambda n: n["idx"])
-            avisos = []
-            for i in range(len(novos_niveis) - 1):
-                atual, prox = novos_niveis[i], novos_niveis[i + 1]
-                maximo_atual = atual["max_plantoes"]
-                if maximo_atual is None or maximo_atual + 1 != prox["min_plantoes"]:
-                    avisos.append(
-                        f"Entre Nível {atual['idx']} (máx. {maximo_atual}) e Nível {prox['idx']} "
-                        f"(mín. {prox['min_plantoes']}) há uma lacuna ou sobreposição — médicos "
-                        f"nesse intervalo vão cair no Nível 1 por padrão, sem aviso."
-                    )
-            st.session_state["_avisos_pendentes"] = avisos
-            st.session_state["avisos_config"] = bool(avisos)
-            st.session_state["sucesso_config"] = True
-            st.session_state["niveis_custom"] = novos_niveis
-            st.rerun()
-        if cbtn2.button("↩️ Restaurar padrão aprovado"):
-            st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
-            st.rerun()
-        st.caption(
-            "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta carência "
-            "e, portanto, todos os meses navegáveis abaixo, não só o mês selecionado)."
-        )
-    else:
-        st.dataframe(df_config, use_container_width=True)
-
-meses_disponiveis = sorted(niveis_df["anomes"].unique())
-# Se um upload de Excel novo mudou o intervalo de meses disponivel (ex.: arquivo mais curto), o
-# mes que estava selecionado antes pode nao existir mais na lista nova - sem esse fallback, o
-# .index() abaixo quebra o app com ValueError.
-if (
-    "mes_selecionado" not in st.session_state
-    or st.session_state["mes_selecionado"] not in meses_disponiveis
-):
-    st.session_state["mes_selecionado"] = meses_disponiveis[-1]
-
-mcol1, mcol2, mcol3 = st.columns([1, 3, 1])
-idx_atual = meses_disponiveis.index(st.session_state["mes_selecionado"])
-with mcol1:
-    if st.button("← Mês anterior", disabled=(idx_atual == 0), use_container_width=True):
-        st.session_state["mes_selecionado"] = meses_disponiveis[idx_atual - 1]
-        st.rerun()
-with mcol2:
-    mes_escolhido = st.select_slider(
-        "Navegar por mês", options=meses_disponiveis,
-        value=st.session_state["mes_selecionado"], key="slider_mes", label_visibility="collapsed",
-    )
-    if mes_escolhido != st.session_state["mes_selecionado"]:
-        st.session_state["mes_selecionado"] = mes_escolhido
-        st.rerun()
-with mcol3:
-    if st.button("Mês seguinte →", disabled=(idx_atual == len(meses_disponiveis) - 1), use_container_width=True):
-        st.session_state["mes_selecionado"] = meses_disponiveis[idx_atual + 1]
-        st.rerun()
-
-mes_ref = st.session_state["mes_selecionado"]
+mes_ref = st.session_state["slider_mes"]
 snap_completo = core.status_atual(niveis_df, anomes_referencia=mes_ref)
 # "ativo no mes" = fez pelo menos 1 plantao naquele mes. snap_completo tambem carrega medicos com
 # 0 plantoes no mes (preservados no historico so pra manter a carencia funcionando corretamente
