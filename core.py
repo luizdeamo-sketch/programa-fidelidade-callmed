@@ -217,17 +217,25 @@ def resumo_locais_para_apoio(df_linhas, apoio_df):
     return tabela.sort_values(["classificado", "total_linhas"], ascending=[True, False])
 
 
-def _ler_plantoes_excel(arquivo=None):
+def _ler_plantoes_excel(arquivo=None, retornar_stats=False):
     """So a leitura crua do Excel (aba 'BD', formato "1.ANALISES LUIZ") - retorna DataFrame com
     as colunas base (anomes/medico/data_raw/local/tipo/especialidade_bd/valor), sem nenhum flag
     de elegibilidade calculado ainda. Ver enriquecer_plantoes() pro resto do pipeline - separado
-    pra poder trocar a FONTE (Excel local vs Supabase) sem duplicar a logica de enriquecimento."""
+    pra poder trocar a FONTE (Excel local vs Supabase) sem duplicar a logica de enriquecimento.
+
+    Linhas com valor <= 0 (ou nao numerico) sao descartadas - normalmente lixo/linha em branco,
+    mas pode incluir uma correcao negativa legitima tipo 'Diferença Vr de plantão' (ainda em
+    aberto, ver Programa_Constelacao_CallMed_v2.md secao 4). Antes isso era 100% silencioso
+    (achado na auditoria de 2026-08-20) - com retornar_stats=True, retorna (df, stats) com a
+    contagem de quantas linhas foram descartadas por isso, pra quem chama poder avisar o master
+    em vez de simplesmente sumir com o dado."""
     arquivo = arquivo or cfg.resolver_base_plantoes()
     wb = load_workbook(arquivo, data_only=True, read_only=True)
     ws = wb["BD"]
     rows_iter = ws.iter_rows(values_only=True)
     next(rows_iter)
     linhas = []
+    descartadas_valor_invalido = 0
     for row in rows_iter:
         mes, ano, data_raw, local = row[3], row[4], row[5], row[7]
         medico, tipo, valor = row[10], row[11], row[12]
@@ -235,6 +243,10 @@ def _ler_plantoes_excel(arquivo=None):
         if not isinstance(mes, (int, float)) or not isinstance(ano, (int, float)):
             continue
         if not isinstance(valor, (int, float)) or valor <= 0:
+            if medico and medico not in PLACEHOLDERS_MEDICO:
+                # so conta como "descartada" se pelo menos parecia uma linha de verdade (tinha
+                # medico) - uma linha em branco de fato nao e um dado perdido, e ruido da planilha.
+                descartadas_valor_invalido += 1
             continue
         if not medico or medico in PLACEHOLDERS_MEDICO:
             continue
@@ -249,7 +261,10 @@ def _ler_plantoes_excel(arquivo=None):
             "valor": float(valor),
         })
     wb.close()
-    return pd.DataFrame(linhas)
+    df = pd.DataFrame(linhas)
+    if retornar_stats:
+        return df, {"descartadas_valor_invalido": descartadas_valor_invalido}
+    return df
 
 
 def enriquecer_plantoes(df, apoio_df=None, arquivo=None):
@@ -384,6 +399,74 @@ def salvar_apoio_supabase(client, apoio_df):
         client.table("apoio").upsert(registros[i:i + 500], on_conflict="local").execute()
 
 
+def consultar_config_supabase(client, chave, padrao=None):
+    """Le uma config editavel (niveis_custom, operacoes_excluidas, medicos_gestores, custo_seguro,
+    rampup) da tabela public.config (JSONB, chave->valor) - substitui o que antes vivia só em
+    st.session_state e se perdia a cada sessão nova/redeploy (achado real na auditoria de
+    2026-08-20: 5 telas de configuração "aplicavam" mas não gravavam em lugar nenhum permanente).
+    Retorna 'padrao' se a chave ainda não existe (primeira vez que o sistema roda)."""
+    resposta = client.table("config").select("valor").eq("chave", chave).limit(1).execute()
+    if not resposta.data:
+        return padrao
+    return resposta.data[0]["valor"]
+
+
+def salvar_config_supabase(client, chave, valor):
+    """Grava (upsert) uma config editável na tabela public.config."""
+    client.table("config").upsert(
+        {"chave": chave, "valor": valor}, on_conflict="chave"
+    ).execute()
+
+
+def consultar_rampup_supabase(client):
+    """Le todos os disparos de bônus de ramp-up já confirmados (tabela public.rampup_disparos) -
+    cada linha é um disparo real, com a operação, o % e a lista exata de meses escolhidos."""
+    resposta = (
+        client.table("rampup_disparos")
+        .select("id,operacao,pct,meses,disparado_por,disparado_em")
+        .order("disparado_em", desc=True)
+        .execute()
+    )
+    return pd.DataFrame(
+        resposta.data,
+        columns=["id", "operacao", "pct", "meses", "disparado_por", "disparado_em"],
+    )
+
+
+def salvar_rampup_supabase(client, operacao, pct, meses, disparado_por):
+    """Grava um disparo de bônus de ramp-up de verdade (antes só mostrava uma mensagem de sucesso
+    sem persistir nada em lugar nenhum - achado real na auditoria de 2026-08-20, o botão
+    'Confirmar disparo' não tinha efeito nenhum além da mensagem na tela)."""
+    client.table("rampup_disparos").insert({
+        "operacao": operacao, "pct": float(pct), "meses": list(meses),
+        "disparado_por": disparado_por,
+    }).execute()
+
+
+def calcular_rampup_por_medico_mes(df_linhas, rampup_df):
+    """Para cada disparo de ramp-up (operação + lista de meses + %), soma o valor de repasse do
+    médico NAQUELA operação específica, só nos meses escolhidos no disparo, e aplica o %. Um
+    médico que atende mais de um hospital em ramp-up ao mesmo tempo soma os bônus de cada um.
+    Retorna (medico, anomes) -> custo_rampup_mes, pra o app somar em cima de valor_total_geral."""
+    colunas_vazias = ["medico", "anomes", "custo_rampup_mes"]
+    if rampup_df is None or rampup_df.empty or df_linhas.empty:
+        return pd.DataFrame(columns=colunas_vazias)
+    validos = df_linhas[df_linhas["conta_pro_nivel"]]
+    partes = []
+    for _, disparo in rampup_df.iterrows():
+        meses_disparo = set(disparo["meses"] or [])
+        if not meses_disparo:
+            continue
+        filtro = (validos["operacao"] == disparo["operacao"]) & validos["anomes"].isin(meses_disparo)
+        sub = validos[filtro].groupby(["medico", "anomes"], as_index=False)["valor"].sum()
+        sub["custo_rampup_mes"] = sub["valor"] * float(disparo["pct"])
+        partes.append(sub[["medico", "anomes", "custo_rampup_mes"]])
+    if not partes:
+        return pd.DataFrame(columns=colunas_vazias)
+    todos = pd.concat(partes, ignore_index=True)
+    return todos.groupby(["medico", "anomes"], as_index=False)["custo_rampup_mes"].sum()
+
+
 def enviar_planilha_supabase(client, arquivo_upload):
     """Le uma planilha (upload do master, cobrindo qualquer periodo - nao precisa ser a base
     inteira) e faz UPSERT no Supabase, usando a chave (medico, data_raw, local, tipo, valor) pra
@@ -395,9 +478,12 @@ def enviar_planilha_supabase(client, arquivo_upload):
     Retorna um resumo (dict) pra tela mostrar pro master: quantas linhas vieram na planilha, quais
     meses ela cobre, quantas ja existiam no banco pra esses meses (antes do envio) e quantas
     existem depois - a diferenca e quanto foi realmente adicionado."""
-    df_cru = _ler_plantoes_excel(arquivo_upload)
+    df_cru, stats_leitura = _ler_plantoes_excel(arquivo_upload, retornar_stats=True)
     if df_cru.empty:
-        return {"linhas_enviadas": 0, "meses": [], "existentes_antes": 0, "existentes_depois": 0, "novas": 0}
+        return {
+            "linhas_enviadas": 0, "meses": [], "existentes_antes": 0, "existentes_depois": 0,
+            "novas": 0, "descartadas_valor_invalido": stats_leitura["descartadas_valor_invalido"],
+        }
 
     meses = sorted(df_cru["anomes"].unique())
 
@@ -444,6 +530,7 @@ def enviar_planilha_supabase(client, arquivo_upload):
         "meses": meses,
         "existentes_antes": existentes_antes,
         "existentes_depois": existentes_depois,
+        "descartadas_valor_invalido": stats_leitura["descartadas_valor_invalido"],
         "novas": existentes_depois - existentes_antes,
     }
 

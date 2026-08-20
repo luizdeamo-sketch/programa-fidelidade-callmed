@@ -178,6 +178,7 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
     # nome) - moda entre TODOS os plantoes dele na base (nao so o mes de referencia), pra nao
     # oscilar mes a mes por causa de um plantao avulso fora da especialidade principal.
     especialidades_medico_rel = df_linhas.loc[df_linhas["medico"] == nome_medico, "especialidade"]
+    especialidades_medico_rel = especialidades_medico_rel[especialidades_medico_rel != ""]
     moda_especialidade_rel = especialidades_medico_rel.mode()
     especialidade_rel = moda_especialidade_rel.iat[0] if not moda_especialidade_rel.empty else "—"
 
@@ -449,25 +450,45 @@ if "usuario" not in st.session_state:
 usuario = st.session_state["usuario"]
 eh_master = usuario["papel"] in usuarios.PAPEIS_COM_ACAO_SENSIVEL
 
+# Configurações editáveis (níveis/carência, operações excluídas, gestores manuais, custo do
+# seguro, parâmetros de ramp-up) agora vêm do Supabase (tabela public.config) na primeira vez que
+# a sessão abre - antes viviam só em st.session_state e SE PERDIAM a cada sessão nova/redeploy,
+# sem aviso nenhum (achado real na auditoria de 2026-08-20: a tela dizia "aplicado" mas nada
+# gravava em lugar permanente). Uma vez carregado pra session_state, o resto do app usa
+# normalmente; cada botão "Aplicar"/"Restaurar" agora também grava de volta no Supabase.
+_sb = supabase_client.get_client()
+
 if "niveis_custom" not in st.session_state:
-    st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
+    st.session_state["niveis_custom"] = core.consultar_config_supabase(
+        _sb, "niveis_custom", copy.deepcopy(core.NIVEIS)
+    )
 if "apoio_custom" not in st.session_state:
     # Le do Supabase (tabela public.apoio) - fonte de verdade desde a migracao 2026-08-20.
-    st.session_state["apoio_custom"] = core.consultar_apoio_supabase(supabase_client.get_client())
+    st.session_state["apoio_custom"] = core.consultar_apoio_supabase(_sb)
 
 df_linhas = carregar_linhas_brutas(apoio_para_json(st.session_state["apoio_custom"]))
 if "operacoes_excluidas" not in st.session_state:
-    st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
+    padrao_operacoes = list(core.operacoes_excluidas_por_padrao(df_linhas))
+    st.session_state["operacoes_excluidas"] = set(
+        core.consultar_config_supabase(_sb, "operacoes_excluidas", padrao_operacoes)
+    )
 if "medicos_gestores" not in st.session_state:
-    st.session_state["medicos_gestores"] = set()
+    st.session_state["medicos_gestores"] = set(
+        core.consultar_config_supabase(_sb, "medicos_gestores", [])
+    )
 if "custo_seguro_vida_dit_funeral" not in st.session_state:
-    st.session_state["custo_seguro_vida_dit_funeral"] = core.CUSTO_SEGURO_VIDA_DIT_FUNERAL
-if "custo_seguro_rcp" not in st.session_state:
-    st.session_state["custo_seguro_rcp"] = core.CUSTO_RCP
+    _seguro_cfg = core.consultar_config_supabase(
+        _sb, "custo_seguro",
+        {"vida_dit_funeral": core.CUSTO_SEGURO_VIDA_DIT_FUNERAL, "rcp": core.CUSTO_RCP},
+    )
+    st.session_state["custo_seguro_vida_dit_funeral"] = _seguro_cfg["vida_dit_funeral"]
+    st.session_state["custo_seguro_rcp"] = _seguro_cfg["rcp"]
 if "rampup_pct" not in st.session_state:
-    st.session_state["rampup_pct"] = 0.05
-if "rampup_duracao_meses" not in st.session_state:
-    st.session_state["rampup_duracao_meses"] = 3
+    _rampup_cfg = core.consultar_config_supabase(_sb, "rampup_params", {"pct": 0.05, "duracao_meses": 3})
+    st.session_state["rampup_pct"] = _rampup_cfg["pct"]
+    st.session_state["rampup_duracao_meses"] = _rampup_cfg["duracao_meses"]
+if "rampup_disparos" not in st.session_state:
+    st.session_state["rampup_disparos"] = core.consultar_rampup_supabase(_sb)
 
 agg = agregar_com_operacoes(df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])))
 niveis_df = calcular_niveis_cached(
@@ -478,6 +499,14 @@ niveis_df = calcular_niveis_cached(
 if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")
     st.stop()
+
+# Aplica os bônus de ramp-up já disparados de verdade (tabela public.rampup_disparos) em cima do
+# valor_total_geral - antes "Confirmar disparo" só mostrava uma mensagem de sucesso, sem gravar
+# nem afetar nenhum cálculo em lugar nenhum (achado real na auditoria de 2026-08-20).
+rampup_por_medico_mes = core.calcular_rampup_por_medico_mes(df_linhas, st.session_state["rampup_disparos"])
+niveis_df = niveis_df.merge(rampup_por_medico_mes, on=["medico", "anomes"], how="left")
+niveis_df["custo_rampup_mes"] = niveis_df["custo_rampup_mes"].fillna(0.0)
+niveis_df["valor_total_geral"] = niveis_df["valor_total_geral"] + niveis_df["custo_rampup_mes"]
 
 meses_disponiveis = sorted(niveis_df["anomes"].unique())
 # "mes_atual" e a UNICA fonte de verdade do mes selecionado (mesmo key do widget). Os botoes
@@ -510,6 +539,10 @@ def _ir_mes(delta):
 def _restaurar_seguro():
     st.session_state["custo_seguro_vida_dit_funeral"] = core.CUSTO_SEGURO_VIDA_DIT_FUNERAL
     st.session_state["custo_seguro_rcp"] = core.CUSTO_RCP
+    core.salvar_config_supabase(
+        supabase_client.get_client(), "custo_seguro",
+        {"vida_dit_funeral": core.CUSTO_SEGURO_VIDA_DIT_FUNERAL, "rcp": core.CUSTO_RCP},
+    )
 
 
 def _restaurar_rampup():
@@ -517,6 +550,9 @@ def _restaurar_rampup():
     st.session_state["input_rampup_duracao"] = 3
     st.session_state["rampup_pct"] = 0.05
     st.session_state["rampup_duracao_meses"] = 3
+    core.salvar_config_supabase(
+        supabase_client.get_client(), "rampup_params", {"pct": 0.05, "duracao_meses": 3}
+    )
 
 
 with st.sidebar:
@@ -593,6 +629,12 @@ with st.sidebar:
                 f"{resumo_envio['existentes_antes']:,} já existiam nesses meses antes do envio "
                 "(sobreposição, mantidas sem duplicar)."
             )
+            if resumo_envio.get("descartadas_valor_invalido"):
+                st.warning(
+                    f"⚠️ {resumo_envio['descartadas_valor_invalido']:,} linha(s) da planilha "
+                    "foram ignoradas por ter valor zero, negativo ou não numérico (não entraram "
+                    "no envio acima) — confira se não é uma correção legítima antes de descartar."
+                )
 
         if eh_master:
             novo_arquivo = st.file_uploader(
@@ -736,7 +778,7 @@ if pagina == "🏥 Operações":
         "inteiro, não só o mês atual."
     )
     if st.session_state.pop("sucesso_operacoes", False):
-        st.success("Lista de operações aplicada — histórico recalculado.")
+        st.success("Lista de operações salva no Supabase e aplicada — histórico recalculado.")
 
     resumo_op = core.listar_operacoes(df_linhas)
     tabela_op = resumo_op[["chave_operacao", "operacao", "especialidade", "total_linhas", "conta_hoje"]].copy()
@@ -762,10 +804,15 @@ if pagina == "🏥 Operações":
                 tabela_editada.loc[~tabela_editada["Incluída"], "chave_operacao"]
             )
             st.session_state["operacoes_excluidas"] = novas_excluidas
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "operacoes_excluidas", list(novas_excluidas)
+            )
             st.session_state["sucesso_operacoes"] = True
             st.rerun()
         if st.button("↩️ Restaurar padrão (só Anestesia, fora Mário Covas/Amhemed)"):
-            st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
+            padrao = core.operacoes_excluidas_por_padrao(df_linhas)
+            st.session_state["operacoes_excluidas"] = padrao
+            core.salvar_config_supabase(supabase_client.get_client(), "operacoes_excluidas", list(padrao))
             st.rerun()
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")
@@ -785,7 +832,7 @@ if pagina == "👔 Gestores":
         "base — um médico vira Nível 4 se tiver qualquer uma das duas."
     )
     if st.session_state.pop("sucesso_gestores", False):
-        st.success("Lista de gestores aplicada — histórico recalculado.")
+        st.success("Lista de gestores salva no Supabase e aplicada — histórico recalculado.")
 
     medicos_todos = core.listar_medicos(agg)
     if eh_master:
@@ -797,10 +844,12 @@ if pagina == "👔 Gestores":
         )
         if st.button("✅ Aplicar e recalcular", type="primary"):
             st.session_state["medicos_gestores"] = set(selecionados)
+            core.salvar_config_supabase(supabase_client.get_client(), "medicos_gestores", selecionados)
             st.session_state["sucesso_gestores"] = True
             st.rerun()
         if st.button("↩️ Limpar lista"):
             st.session_state["medicos_gestores"] = set()
+            core.salvar_config_supabase(supabase_client.get_client(), "medicos_gestores", [])
             st.rerun()
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")
@@ -829,7 +878,7 @@ if pagina == "⚙️ Regras do Programa":
         "mês, sem esperar carência (esclarecido pelo usuário, 2026-08-20)."
     )
     if st.session_state.pop("sucesso_config", False):
-        st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
+        st.success("Parâmetros salvos no Supabase e aplicados — histórico recalculado com as novas regras.")
     if st.session_state.pop("avisos_config", None):
         for a in st.session_state.get("_avisos_pendentes", []):
             st.warning(a)
@@ -890,9 +939,12 @@ if pagina == "⚙️ Regras do Programa":
             st.session_state["avisos_config"] = bool(avisos)
             st.session_state["sucesso_config"] = True
             st.session_state["niveis_custom"] = novos_niveis
+            core.salvar_config_supabase(supabase_client.get_client(), "niveis_custom", novos_niveis)
             st.rerun()
         if cbtn2.button("↩️ Restaurar padrão", key="btn_restaurar_niveis"):
-            st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
+            padrao_niveis = copy.deepcopy(core.NIVEIS)
+            st.session_state["niveis_custom"] = padrao_niveis
+            core.salvar_config_supabase(supabase_client.get_client(), "niveis_custom", padrao_niveis)
             st.rerun()
         st.caption(
             "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta "
@@ -905,7 +957,7 @@ if pagina == "⚙️ Regras do Programa":
     st.markdown("---")
     st.markdown("#### Pacote de seguros (a partir do Nível 3)")
     if st.session_state.pop("sucesso_seguro", False):
-        st.success("Custo do seguro aplicado — histórico recalculado.")
+        st.success("Custo do seguro salvo no Supabase e aplicado — histórico recalculado.")
 
     if eh_master:
         # Key do widget = mesmo nome da variavel de session_state (igual ao fix do "mes_atual") -
@@ -927,6 +979,13 @@ if pagina == "⚙️ Regras do Programa":
         )
         sbtn1, sbtn2 = st.columns(2)
         if sbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_seguro"):
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "custo_seguro",
+                {
+                    "vida_dit_funeral": st.session_state["custo_seguro_vida_dit_funeral"],
+                    "rcp": st.session_state["custo_seguro_rcp"],
+                },
+            )
             st.session_state["sucesso_seguro"] = True
             st.rerun()
         sbtn2.button("↩️ Restaurar padrão", key="btn_restaurar_seguro", on_click=_restaurar_seguro)
@@ -940,7 +999,7 @@ if pagina == "⚙️ Regras do Programa":
     st.markdown("---")
     st.markdown("#### Bônus hospital em ramp-up")
     if st.session_state.pop("sucesso_rampup", False):
-        st.success("Parâmetros do bônus de ramp-up aplicados.")
+        st.success("Parâmetros do bônus de ramp-up salvos no Supabase e aplicados.")
 
     # "input_rampup_pct" guarda o % em unidade de exibicao (0-100), separado de "rampup_pct" (0-1,
     # usado direto no calculo do bonus) - por isso precisa de conversao no Aplicar, diferente do
@@ -968,6 +1027,10 @@ if pagina == "⚙️ Regras do Programa":
         if rbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_rampup"):
             st.session_state["rampup_pct"] = st.session_state["input_rampup_pct"] / 100
             st.session_state["rampup_duracao_meses"] = int(st.session_state["input_rampup_duracao"])
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "rampup_params",
+                {"pct": st.session_state["rampup_pct"], "duracao_meses": st.session_state["rampup_duracao_meses"]},
+            )
             st.session_state["sucesso_rampup"] = True
             st.rerun()
         rbtn2.button(
@@ -1032,10 +1095,13 @@ st.caption(
     "contam pros médicos que já cumpriram a carência do Nível 3+ (nível de benefícios) - ver "
     "coluna 'Faltam p/ próximo nível' na tabela abaixo pra quem ainda está no período de carência."
 )
-cc1, cc2, cc3 = st.columns(3)
+cc1, cc2, cc3, cc4 = st.columns(4)
 cc1.metric("Seguros (N3+, benefícios liberados)", fmt_brl(snap["custo_seguro_mes"].sum()))
 cc2.metric("Aumento % no repasse (pagamento)", fmt_brl(snap["custo_aumento_pct_mes"].sum()))
-cc3.metric("Total", fmt_brl(snap["custo_seguro_mes"].sum() + snap["custo_aumento_pct_mes"].sum()))
+cc3.metric("Bônus ramp-up ativo", fmt_brl(snap["custo_rampup_mes"].sum()))
+cc4.metric("Total", fmt_brl(
+    snap["custo_seguro_mes"].sum() + snap["custo_aumento_pct_mes"].sum() + snap["custo_rampup_mes"].sum()
+))
 
 st.markdown("---")
 st.markdown("#### Tabela de médicos")
@@ -1070,12 +1136,12 @@ def _resumo_faltam_proximo_nivel(row):
 tabela = tabela.assign(faltam_proximo_nivel=tabela.apply(_resumo_faltam_proximo_nivel, axis=1))
 st.caption("Clique numa linha pra abrir o relatório completo do médico logo abaixo.")
 evento_tabela_medicos = st.dataframe(
-    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto",
+    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno", "nivel_bruto",
             "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral",
             "faltam_proximo_nivel"]]
     .rename(columns={
         "medico": "Médico", "n_plantoes": "Total Plantões", "n_fds": "FDS (Sáb/Dom)",
-        "n_noturno": "Noturno", "nivel_bruto": "Nível",
+        "n_noturno": "Noturno", "n_fds_ou_noturno": "FDS+Noturno (união)", "nivel_bruto": "Nível",
         "pct_aumento_exibido": "% Aumento", "valor_repasse": "Valor Plantões",
         "custo_aumento_pct_mes": "Valor Aumento", "valor_total_geral": "Total Geral",
         "faltam_proximo_nivel": "Faltam p/ próximo nível",
@@ -1113,6 +1179,7 @@ if nome:
     tempo_nivel_c = int(tempo_nivel_c) if pd.notna(tempo_nivel_c) else None
     meses_por_nivel_c = core.meses_por_nivel(hist)
     especialidades_c = df_linhas.loc[df_linhas["medico"] == nome, "especialidade"]
+    especialidades_c = especialidades_c[especialidades_c != ""]
     moda_especialidade_c = especialidades_c.mode()
     especialidade_c = moda_especialidade_c.iat[0] if not moda_especialidade_c.empty else "—"
 
@@ -1175,10 +1242,29 @@ if not eh_master:
         f"você pode simular o custo abaixo, mas não pode confirmar o disparo real."
     )
 
+disparos_existentes = st.session_state["rampup_disparos"]
+if not disparos_existentes.empty:
+    with st.expander(f"📋 Disparos já confirmados ({len(disparos_existentes)})"):
+        st.dataframe(
+            disparos_existentes.assign(
+                meses=disparos_existentes["meses"].apply(lambda m: ", ".join(sorted(m))),
+                pct=disparos_existentes["pct"].apply(lambda p: f"{p * 100:.2f}%"),
+            )[["operacao", "pct", "meses", "disparado_por", "disparado_em"]]
+            .rename(columns={
+                "operacao": "Hospital/Operação", "pct": "%", "meses": "Meses",
+                "disparado_por": "Disparado por", "disparado_em": "Quando",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
 hospitais_disponiveis = sorted(df_linhas["operacao"].unique())
 hosp_sel = st.selectbox("Hospital/operação em ramp-up", [""] + hospitais_disponiveis)
 if hosp_sel:
-    janela = df_linhas[df_linhas["operacao"] == hosp_sel]
+    # So o repasse que CONTA pro nivel (mesmo escopo que calcular_rampup_por_medico_mes usa de
+    # verdade pra aplicar o bonus) - preview tem que bater com o que realmente vai ser aplicado,
+    # senao o master ve um numero no preview e outro depois de confirmar (achado real na
+    # auditoria de 2026-08-20, quando o botao nem persistia nada ainda).
+    janela = df_linhas[(df_linhas["operacao"] == hosp_sel) & (df_linhas["conta_pro_nivel"])]
     meses_disp = sorted(janela["anomes"].unique(), reverse=True)[:6]
     meses_sel = st.multiselect(
         f"Meses do ramp-up (padrão: {rampup_duracao} meses seguidos)",
@@ -1188,11 +1274,19 @@ if hosp_sel:
         repasse_periodo = janela[janela["anomes"].isin(meses_sel)]["valor"].sum()
         st.metric(f"Bônus de {rampup_pct * 100:.2f}% sobre o repasse ({hosp_sel}, {len(meses_sel)} meses)",
                   fmt_brl(repasse_periodo * rampup_pct))
-        st.caption(f"Repasse total no período de referência: {fmt_brl(repasse_periodo)}")
+        st.caption(f"Repasse total no período de referência (só plantões que contam pro nível): {fmt_brl(repasse_periodo)}")
         if eh_master:
             if st.button("✅ Confirmar disparo do bônus"):
-                st.success(
-                    f"Disparado por {usuario['nome']} ({mes_ref}): {hosp_sel}, "
-                    f"{fmt_brl(repasse_periodo * rampup_pct)} sobre {len(meses_sel)} meses. "
-                    f"(Registro apenas nesta sessão - ainda não persiste em arquivo.)"
+                core.salvar_rampup_supabase(
+                    supabase_client.get_client(), hosp_sel, rampup_pct, meses_sel, usuario["nome"]
                 )
+                st.session_state["rampup_disparos"] = core.consultar_rampup_supabase(
+                    supabase_client.get_client()
+                )
+                st.success(
+                    f"Disparado por {usuario['nome']}: {hosp_sel}, {rampup_pct * 100:.2f}% sobre "
+                    f"{len(meses_sel)} meses ({fmt_brl(repasse_periodo * rampup_pct)} no período de "
+                    "referência). Salvo no Supabase — já entra no Total Geral de cada médico "
+                    "atendido nesses meses."
+                )
+                st.rerun()
