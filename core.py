@@ -654,6 +654,47 @@ def proximo_nivel_info(row):
     }
 
 
+def simular_todos_niveis(row, niveis=None):
+    """Generaliza proximo_nivel_info: em vez de só o próximo nível, calcula pra CADA nível ainda
+    não alcançado (acima do nivel_bruto do mês) quantos plantões/FDS+Noturno faltam e uma
+    estimativa de ganho extra de bonificação (R$) se o médico completasse esse volume ainda este
+    mês. Pedido do usuário (2026-08-20): dar ao escalista uma visão tipo "faltam X plantões pro N3,
+    mais Y pro N4" pra usar no dia a dia, junto com o valor estimado.
+
+    O ganho estimado usa o mesmo raciocínio de proximo_nivel_info/renderizar_relatorio_medico: o
+    ticket médio já realizado no mês (valor_repasse / n_plantoes) projeta o valor com os plantões
+    que faltam, aplica o % daquele nível, e subtrai a bonificação que já está valendo agora
+    (custo_aumento_pct_mes, calculada em cima do nivel_vestido, não do nivel_bruto - pode haver
+    carência entre os dois). É estimativa (o ticket médio dos próximos plantões pode variar), não
+    projeção garantida.
+
+    Retorna lista ordenada do nível mais próximo pro mais distante; lista vazia se já está no
+    Nível 4."""
+    niveis = niveis or NIVEIS
+    niveis_dict = {n["idx"]: n for n in niveis}
+    nivel_atual = int(row["nivel_bruto"])
+    n_plantoes_atual = int(row["n_plantoes"])
+    valor_repasse_atual = float(row["valor_repasse"])
+    ticket_medio = valor_repasse_atual / n_plantoes_atual if n_plantoes_atual > 0 else 0.0
+    bonificacao_atual = float(row.get("custo_aumento_pct_mes", 0.0))
+
+    resultado = []
+    for idx in range(nivel_atual + 1, 5):
+        alvo = niveis_dict.get(idx)
+        if alvo is None:
+            continue
+        faltam_plantoes = max(0, alvo["min_plantoes"] - n_plantoes_atual)
+        faltam_fds_ou_noturno = max(0, alvo["min_fds"] - row["n_fds_ou_noturno"])
+        valor_projetado = valor_repasse_atual + faltam_plantoes * ticket_medio
+        ganho_projetado = valor_projetado * alvo["pct_aumento"]
+        resultado.append({
+            "nivel_idx": idx, "nivel_nome": alvo["nome"], "pct_exibido": alvo["pct_exibido"],
+            "faltam_plantoes": faltam_plantoes, "faltam_fds_ou_noturno": faltam_fds_ou_noturno,
+            "ganho_extra_estimado": max(0.0, ganho_projetado - bonificacao_atual),
+        })
+    return resultado
+
+
 # Beneficios por nivel (Programa_Constelacao_CallMed_v2.md secao 2) - cada nivel soma aos
 # anteriores (Nivel 3 tem tudo do 1+2+3). Usado no "Relatorio do Medico" (tela + PDF pra entregar
 # ao medico) - texto em tom de comunicado, nao o tom tecnico do documento de regras.

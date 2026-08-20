@@ -84,6 +84,15 @@ def fmt_brl(v):
     return f"R$ {v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
+def fmt_brl_md(v):
+    """Mesmo formato de fmt_brl, mas com o "$" escapado ("\\$") - streamlit trata "$" como
+    delimitador de matemática dentro de st.markdown, e duas ocorrências (ex.: valor final + valor
+    do ganho) na MESMA chamada quebram a renderização (vira texto cru em vez de negrito/HTML) -
+    bug real encontrado na Calculadora de Plantão, 2026-08-20. Usar sempre que fmt_brl aparecer
+    dentro de um st.markdown/unsafe_allow_html junto de outro texto formatado."""
+    return fmt_brl(v).replace("$", "\\$")
+
+
 def badge_nivel(n):
     cores = {1: "#9CA3AF", 2: "#60A5FA", 3: "#A78BFA", 4: "#FBBF24"}
     return f'<span style="background:{cores.get(n,"#999")};color:#111;padding:2px 10px;border-radius:12px;font-weight:600;">Nível {n}</span>'
@@ -459,13 +468,13 @@ with st.sidebar:
             ganho_calc = valor_basal_calc * nivel_calc["pct_aumento"]
             valor_final_calc = valor_basal_calc + ganho_calc
             complemento = (
-                f" &nbsp; <span style='color:#6B7280;font-size:0.85em'>(+{fmt_brl(ganho_calc)}, "
+                f" &nbsp; <span style='color:#6B7280;font-size:0.85em'>(+{fmt_brl_md(ganho_calc)}, "
                 f"{nivel_calc['pct_exibido']}%)</span>"
                 if nivel_calc["pct_aumento"] else
                 " &nbsp; <span style='color:#6B7280;font-size:0.85em'>(valor cheio, sem aumento)</span>"
             )
             st.markdown(
-                f"{badge_nivel(nivel_calc['idx'])} &nbsp; **{fmt_brl(valor_final_calc)}**{complemento}",
+                f"{badge_nivel(nivel_calc['idx'])} &nbsp; **{fmt_brl_md(valor_final_calc)}**{complemento}",
                 unsafe_allow_html=True,
             )
 
@@ -932,15 +941,38 @@ filtro_nivel = st.multiselect("Filtrar por nível", [1, 2, 3, 4], key="filtro_ni
 tabela = snap[snap["nivel_vestido"].isin(filtro_nivel)].sort_values(
     ["nivel_vestido", "n_plantoes"], ascending=[False, False]
 )
+
+
+def _resumo_faltam_proximo_nivel(row):
+    """Texto compacto pra coluna 'Faltam p/ próximo nível' - pedido do usuário 2026-08-20, pra
+    dar visibilidade direto na tabela (uso diário pelo escalista) de quanto falta pro médico subir,
+    sem precisar abrir o relatório completo de cada um."""
+    sim = core.simular_todos_niveis(row)
+    if not sim:
+        return "Nível máximo"
+    prox = sim[0]
+    partes = []
+    if prox["faltam_plantoes"] > 0:
+        partes.append(f"{prox['faltam_plantoes']} plantão(ões)")
+    if prox["faltam_fds_ou_noturno"] > 0:
+        partes.append(f"{prox['faltam_fds_ou_noturno']} FDS/Not.")
+    if not partes:
+        return f"N{prox['nivel_idx']} já sustentado (aguardando carência)"
+    return f"N{prox['nivel_idx']}: +{' e +'.join(partes)}"
+
+
+tabela = tabela.assign(faltam_proximo_nivel=tabela.apply(_resumo_faltam_proximo_nivel, axis=1))
 st.caption("Clique numa linha pra abrir o relatório completo do médico logo abaixo.")
 evento_tabela_medicos = st.dataframe(
     tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_vestido",
-            "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral"]]
+            "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral",
+            "faltam_proximo_nivel"]]
     .rename(columns={
         "medico": "Médico", "n_plantoes": "Total Plantões", "n_fds": "FDS (Sáb/Dom)",
         "n_noturno": "Noturno", "nivel_vestido": "Nível",
         "pct_aumento_exibido": "% Aumento", "valor_repasse": "Valor Plantões",
         "custo_aumento_pct_mes": "Valor Aumento", "valor_total_geral": "Total Geral",
+        "faltam_proximo_nivel": "Faltam p/ próximo nível",
     })
     .style.format({"% Aumento": "{:.0f}%", "Valor Plantões": fmt_brl, "Valor Aumento": fmt_brl,
                     "Total Geral": fmt_brl}),
@@ -983,6 +1015,39 @@ if nome:
             f"elevado só passa a valer depois da carência (meses seguidos mantendo o critério). "
             f"Hoje está com o **Nível {atual['nivel_vestido']}** ativo."
         )
+
+    # ------------------------------------------------------- SIMULAÇÃO: FALTAM QUANTOS PRO PRÓXIMO?
+    # Pedido do usuário (2026-08-20): pro escalista poder avisar o médico "faltam X plantões pro
+    # Nível 3, mais Y pro Nível 4" com o valor estimado do lado, direto na consulta - não só no
+    # relatório/PDF final. Usa o mesmo ticket médio do mês (core.simular_todos_niveis).
+    sim_niveis = core.simular_todos_niveis(atual)
+    st.markdown("**Simulação — quanto falta pra cada nível acima**")
+    if sim_niveis:
+        for sim in sim_niveis:
+            partes_sim = []
+            if sim["faltam_plantoes"] > 0:
+                partes_sim.append(f"{sim['faltam_plantoes']} plantão(ões)")
+            if sim["faltam_fds_ou_noturno"] > 0:
+                partes_sim.append(f"{sim['faltam_fds_ou_noturno']} de FDS/noturno")
+            texto_falta = (
+                f"faltam **{' e '.join(partes_sim)}** este mês" if partes_sim
+                else "**já sustentado** pelo volume deste mês (aguardando carência)"
+            )
+            complemento_valor = (
+                f" — cerca de **{fmt_brl_md(sim['ganho_extra_estimado'])} a mais** de bonificação"
+                if sim["ganho_extra_estimado"] > 0 else ""
+            )
+            st.markdown(
+                f"{badge_nivel(sim['nivel_idx'])} &nbsp; ({sim['pct_exibido']}% de aumento) — "
+                f"{texto_falta}{complemento_valor}.",
+                unsafe_allow_html=True,
+            )
+        st.caption(
+            "Estimativa de ganho com base no ticket médio dos plantões já feitos neste mês — pode "
+            "variar conforme o valor real dos próximos plantões."
+        )
+    else:
+        st.success("Já está no Nível 4 — nível máximo do programa.")
 
     with st.expander("Ver histórico completo"):
         st.dataframe(
