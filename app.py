@@ -880,7 +880,7 @@ if pagina == "⚙️ Regras do Programa":
     # ---------------------------------------------------------- NÍVEIS, CARÊNCIA, % AUMENTO
     st.markdown("#### Níveis, carência e % de aumento no plantão")
     st.caption(
-        "A carência só segura os **benefícios extras** do nível (seguro a partir do Nível 3, "
+        "A carência só segura os **benefícios extras** do nível (seguro a partir do Nível 2, "
         "cursos, licenças) — o **% de aumento no plantão** vale imediato, pelo volume do próprio "
         "mês, sem esperar carência (esclarecido pelo usuário, 2026-08-20)."
     )
@@ -929,7 +929,7 @@ if pagina == "⚙️ Regras do Programa":
                     "carencia_meses": int(row["Carência (meses)"]),
                     "pct_aumento": float(row["% aumento no plantão"]) / 100,
                     "pct_exibido": round(float(row["% aumento no plantão"])),
-                    "tem_seguro": int(idx) >= 3,
+                    "tem_seguro": int(idx) >= 2,
                 })
             novos_niveis.sort(key=lambda n: n["idx"])
             avisos = []
@@ -960,9 +960,9 @@ if pagina == "⚙️ Regras do Programa":
     else:
         st.dataframe(df_config, use_container_width=True)
 
-    # ---------------------------------------------------------- SEGUROS (N3+)
+    # ---------------------------------------------------------- SEGUROS (N2+)
     st.markdown("---")
-    st.markdown("#### Pacote de seguros (a partir do Nível 3)")
+    st.markdown("#### Pacote de seguros (a partir do Nível 2)")
     if st.session_state.pop("sucesso_seguro", False):
         st.success("Custo do seguro salvo no Supabase e aplicado — histórico recalculado.")
 
@@ -982,7 +982,7 @@ if pagina == "⚙️ Regras do Programa":
         )
         st.caption(
             f"Total atual: {fmt_brl(st.session_state['custo_seguro_vida_dit_funeral'] + st.session_state['custo_seguro_rcp'])}"
-            f"/médico/mês (cobrado de todo médico Nível 3+)."
+            f"/médico/mês (cobrado de todo médico Nível 2+)."
         )
         sbtn1, sbtn2 = st.columns(2)
         if sbtn1.button("✅ Aplicar", type="primary", key="btn_aplicar_seguro"):
@@ -1106,19 +1106,31 @@ cc1.metric("Aumento % no repasse (pagamento)", fmt_brl(snap["custo_aumento_pct_m
 cc2.metric("Bônus ramp-up ativo", fmt_brl(snap["custo_rampup_mes"].sum()))
 cc3.metric("Total", fmt_brl(snap["custo_aumento_pct_mes"].sum() + snap["custo_rampup_mes"].sum()))
 
-# ------------------------------------------------------- MÉDICOS COM DIREITO AO SEGURO (N3+)
+# ------------------------------------------------------- MÉDICOS COM DIREITO AO SEGURO
 # Pedido do usuário (2026-08-20): tirar o CUSTO do seguro dessa tela (não faz sentido mostrar
 # valor aqui) e, em vez disso, dar uma lista pronta de quem tem direito - pra mandar pra
-# seguradora atualizar a apólice. "Direito" = nivel_vestido >= 3 (carência do Nível 3+ já
-# cumprida, não só o volume bruto do mês - ver core.calcular_niveis).
-elegiveis_seguro = snap[snap["nivel_vestido"] >= 3].copy()
-with st.expander(f"🛡️ Médicos com direito ao seguro (Nível 3+) — {len(elegiveis_seguro)} médico(s)"):
+# seguradora atualizar a apólice. "Direito" = nivel_vestido >= nivel_min_seguro (carência já
+# cumprida, não só o volume bruto do mês - ver core.calcular_niveis). nivel_min_seguro vem direto
+# da config de níveis (tem_seguro), não é mais fixo em "3" - pra tela acompanhar sozinha se o
+# nível-piso do seguro mudar de novo em "Regras do Programa" (mudou de N3 pra N2 nesse mesmo dia).
+niveis_com_seguro = [n["idx"] for n in st.session_state["niveis_custom"] if n["tem_seguro"]]
+nivel_min_seguro = min(niveis_com_seguro) if niveis_com_seguro else None
+elegiveis_seguro = (
+    snap[snap["nivel_vestido"] >= nivel_min_seguro].copy()
+    if nivel_min_seguro is not None else snap.iloc[0:0].copy()
+)
+with st.expander(
+    f"🛡️ Médicos com direito ao seguro (Nível {nivel_min_seguro}+) — {len(elegiveis_seguro)} médico(s)"
+    if nivel_min_seguro is not None else "🛡️ Médicos com direito ao seguro — 0 médico(s)"
+):
     st.caption(
-        "Lista pronta pra mandar pra seguradora: médicos que já cumpriram a carência do Nível 3+ "
-        "(benefícios liberados), não só quem tem volume suficiente no mês."
+        f"Lista pronta pra mandar pra seguradora: médicos que já cumpriram a carência do Nível "
+        f"{nivel_min_seguro}+ (benefícios liberados), não só quem tem volume suficiente no mês."
+        if nivel_min_seguro is not None else
+        "Nenhum nível está configurado com direito a seguro no momento (ver 'Regras do Programa')."
     )
     if elegiveis_seguro.empty:
-        st.info("Nenhum médico com benefícios de Nível 3+ liberados neste mês ainda.")
+        st.info("Nenhum médico com benefícios de seguro liberados neste mês ainda.")
     else:
         elegiveis_seguro["tempo_beneficio_meses"] = elegiveis_seguro.apply(
             core.tempo_no_nivel_atual, axis=1

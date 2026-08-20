@@ -80,8 +80,10 @@ NIVEIS = [
     # Nivel 4 continua 6.
     {"idx": 1, "nome": "Nível 1", "min_plantoes": 1, "max_plantoes": 9, "min_fds": 0,
      "carencia_meses": 0, "pct_aumento": 0.0, "pct_exibido": 0, "tem_seguro": False},
+    # tem_seguro passou pro Nivel 2 (era so Nivel 3+) - mudanca de regra pedida pelo usuario
+    # 2026-08-20. Seguro agora entra no programa a partir daqui.
     {"idx": 2, "nome": "Nível 2", "min_plantoes": 10, "max_plantoes": 14, "min_fds": 3,
-     "carencia_meses": 2, "pct_aumento": 0.0275, "pct_exibido": 3, "tem_seguro": False},
+     "carencia_meses": 2, "pct_aumento": 0.0275, "pct_exibido": 3, "tem_seguro": True},
     {"idx": 3, "nome": "Nível 3", "min_plantoes": 15, "max_plantoes": 19, "min_fds": 4,
      "carencia_meses": 4, "pct_aumento": 0.0375, "pct_exibido": 4, "tem_seguro": True},
     {"idx": 4, "nome": "Nível 4", "min_plantoes": 20, "max_plantoes": None, "min_fds": 5,
@@ -90,7 +92,8 @@ NIVEIS = [
 NIVEL_POR_IDX = {n["idx"]: n for n in NIVEIS}
 
 # Custos reais confirmados por apolice (Porto Seguro + Unimed Seguros), por medico/mes, a partir
-# do Nivel 3 (onde o seguro entra no programa).
+# do Nivel 2 (onde o seguro entra no programa - mudou de Nivel 3 pro Nivel 2, pedido do usuario
+# 2026-08-20).
 CUSTO_SEGURO_VIDA_DIT_FUNERAL = 185.61  # Porto Seguro: Vida (99k/198k) + DIT (166,66/dia) + Funeral (10k)
 CUSTO_RCP = 117.60  # Unimed Seguros: RCP 100k, franquia zero
 CUSTO_SEGURO_TOTAL_MES = CUSTO_SEGURO_VIDA_DIT_FUNERAL + CUSTO_RCP  # R$303,21
@@ -928,18 +931,20 @@ BENEFICIOS_NIVEL = {
         "Desconto no convênio médico ao contratar pela CallMed",
         "Antecipação de valores de plantão (pago até 2 dias após o plantão)",
     ],
+    # Pacote de seguros movido do Nivel 3 pro Nivel 2 (mudanca de regra pedida pelo usuario,
+    # 2026-08-20) - ver tem_seguro em NIVEIS acima.
     2: [
         "Desconto em planos de saúde",
         "Antecipação dos plantões agendados",
         "Acesso ao programa de mindfulness",
-    ],
-    3: [
-        "50% de reembolso em cursos (ACLS/PALS/COPA/SAVA, 1x/ano, até 3 localidades indicadas)",
-        "Escala preferencial em unidades",
         "Seguro de Vida — R$ 99.000 (morte natural) / R$ 198.000 (morte acidental)",
         "DIT — R$ 166,66/dia em caso de incapacidade temporária",
         "Assistência Funeral Familiar — R$ 10.000",
         "RCP — Responsabilidade Civil Profissional, R$ 100.000, franquia zero",
+    ],
+    3: [
+        "50% de reembolso em cursos (ACLS/PALS/COPA/SAVA, 1x/ano, até 3 localidades indicadas)",
+        "Escala preferencial em unidades",
     ],
     4: [
         "100% de reembolso em cursos",
