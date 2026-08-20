@@ -217,6 +217,13 @@ def resumo_locais_para_apoio(df_linhas, apoio_df):
     return tabela.sort_values(["classificado", "total_linhas"], ascending=[True, False])
 
 
+class ArquivoInvalidoError(Exception):
+    """Levantado quando o arquivo enviado (upload via '📁 Fonte de dados') não tem o formato
+    esperado - aba 'BD' ausente, planilha vazia, etc. Achado real 2026-08-20: o master enviou uma
+    planilha sem essa aba e o sistema quebrou com uma tela de traceback em vez de um aviso
+    entendível - core.py levanta isso com uma mensagem clara, app.py mostra via st.error()."""
+
+
 def _ler_plantoes_excel(arquivo=None, retornar_stats=False):
     """So a leitura crua do Excel (aba 'BD', formato "1.ANALISES LUIZ") - retorna DataFrame com
     as colunas base (anomes/medico/data_raw/local/tipo/especialidade_bd/valor), sem nenhum flag
@@ -231,6 +238,13 @@ def _ler_plantoes_excel(arquivo=None, retornar_stats=False):
     em vez de simplesmente sumir com o dado."""
     arquivo = arquivo or cfg.resolver_base_plantoes()
     wb = load_workbook(arquivo, data_only=True, read_only=True)
+    if "BD" not in wb.sheetnames:
+        abas_encontradas = ", ".join(wb.sheetnames) if wb.sheetnames else "nenhuma"
+        wb.close()
+        raise ArquivoInvalidoError(
+            f"Essa planilha não tem uma aba chamada 'BD' (abas encontradas: {abas_encontradas}). "
+            "Confira se é o arquivo certo, no mesmo formato da base de plantões."
+        )
     ws = wb["BD"]
     rows_iter = ws.iter_rows(values_only=True)
     next(rows_iter)

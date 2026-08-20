@@ -643,13 +643,19 @@ with st.sidebar:
             )
             if novo_arquivo is not None:
                 if st.button("📤 Enviar e mesclar"):
-                    with st.spinner("Lendo a planilha e comparando com o que já está no banco..."):
-                        resumo = core.enviar_planilha_supabase(supabase_client.get_client(), novo_arquivo)
-                    st.session_state["resumo_envio_planilha"] = resumo
-                    carregar_linhas_brutas.clear()
-                    agregar_com_operacoes.clear()
-                    calcular_niveis_cached.clear()
-                    st.rerun()
+                    # Achado real 2026-08-20: planilha com formato errado (sem a aba 'BD') fazia o
+                    # app inteiro quebrar com um traceback cru, em vez de um aviso entendível.
+                    try:
+                        with st.spinner("Lendo a planilha e comparando com o que já está no banco..."):
+                            resumo = core.enviar_planilha_supabase(supabase_client.get_client(), novo_arquivo)
+                    except core.ArquivoInvalidoError as e:
+                        st.error(f"⚠️ Não consegui processar essa planilha: {e}")
+                    else:
+                        st.session_state["resumo_envio_planilha"] = resumo
+                        carregar_linhas_brutas.clear()
+                        agregar_com_operacoes.clear()
+                        calcular_niveis_cached.clear()
+                        st.rerun()
         else:
             st.caption("Envio de novo arquivo é exclusivo do papel master.")
 
