@@ -71,11 +71,18 @@ def _gerar_grafico_historico(historico_mensal):
 
 
 def gerar_pdf_comunicado(
-    nome_medico, mes_ref, nivel_vestido, n_plantoes, n_fds, n_noturno, pct_aumento_exibido,
+    nome_medico, mes_ref, nivel_pagamento, n_plantoes, n_fds, n_noturno, pct_aumento_exibido,
     plantoes_detalhe, valor_total_plantoes, valor_bonificacao,
+    nivel_beneficios=None, especialidade=None,
     tempo_no_nivel=None, proximo_nivel_info=None, tempo_de_casa=None, historico_mensal=None,
 ):
     """Monta o PDF em memória e retorna os bytes prontos pra um st.download_button.
+
+    'nivel_pagamento' (antes chamado 'nivel_vestido') rege o badge/% de aumento no plantão - vale
+    na hora, por volume, sem esperar carência (esclarecido pelo usuário 2026-08-20). Se
+    'nivel_beneficios' vier diferente (carência do nível de pagamento ainda não cumprida - ver
+    core.calcular_niveis), a lista "Seus benefícios" reflete esse nível mais baixo e o PDF avisa
+    a diferença; se não vier, usa o mesmo valor de nivel_pagamento (comportamento antigo).
 
     'plantoes_detalhe' e uma lista de dicts {"data": "dd/mm/aaaa", "operacao": str, "tipo": str,
     "valor": float} - SO os plantoes que contam pro programa no mes (mesmo escopo que gerou
@@ -89,6 +96,7 @@ def gerar_pdf_comunicado(
 
     'historico_mensal' e uma lista de dicts {"mes": "aaaa-mm", "n_plantoes": int, "valor": float}
     (tipicamente os ultimos 12 meses) - vira o grafico de historico com a CallMed."""
+    nivel_beneficios = nivel_pagamento if nivel_beneficios is None else nivel_beneficios
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=letter,
@@ -112,7 +120,7 @@ def gerar_pdf_comunicado(
         "Beneficio", parent=styles["Normal"], fontSize=10.5, leading=16, leftIndent=6,
     )
 
-    cor_nivel = CORES_NIVEL.get(int(nivel_vestido), colors.grey)
+    cor_nivel = CORES_NIVEL.get(int(nivel_pagamento), colors.grey)
     badge_style = ParagraphStyle(
         "NivelBadge", parent=styles["Normal"], fontSize=15, textColor=colors.white,
         backColor=cor_nivel, alignment=1, spaceBefore=4, spaceAfter=14, borderPadding=8,
@@ -125,9 +133,13 @@ def gerar_pdf_comunicado(
         Paragraph(f"Comunicado individual — {mes_ref}", subtitulo),
         HRFlowable(width="100%", thickness=1, color=cor_linha),
         Spacer(1, 14),
-        Paragraph(f"<b>Médico(a):</b> {nome_medico}", corpo),
+        Paragraph(
+            f"<b>Médico(a):</b> {nome_medico}"
+            + (f" &nbsp;·&nbsp; <b>Especialidade:</b> {especialidade}" if especialidade else ""),
+            corpo,
+        ),
         Spacer(1, 6),
-        Paragraph(f"NÍVEL {int(nivel_vestido)} — {pct_aumento_exibido}% de aumento no plantão", badge_style),
+        Paragraph(f"NÍVEL {int(nivel_pagamento)} — {pct_aumento_exibido}% de aumento no plantão", badge_style),
     ]
 
     linhas_tabela = [
@@ -163,7 +175,7 @@ def gerar_pdf_comunicado(
     valor_total_geral = valor_total_plantoes + valor_bonificacao
     linhas_pl.append(["Total de plantões", "", "", _fmt_brl(valor_total_plantoes)])
     linhas_pl.append([
-        f"Bonificação Nível {int(nivel_vestido)} ({pct_aumento_exibido}% sobre o total acima)",
+        f"Bonificação Nível {int(nivel_pagamento)} ({pct_aumento_exibido}% sobre o total acima)",
         "", "", _fmt_brl(valor_bonificacao),
     ])
     linhas_pl.append(["Total geral (plantões + bonificação)", "", "", _fmt_brl(valor_total_geral)])
@@ -199,11 +211,19 @@ def gerar_pdf_comunicado(
     story.append(tabela_pl)
     story.append(Spacer(1, 4))
 
-    story.append(Paragraph(f"Seus benefícios no Nível {int(nivel_vestido)}", h2))
-    for b in core.beneficios_acumulados(nivel_vestido):
+    story.append(Paragraph(f"Seus benefícios no Nível {int(nivel_beneficios)}", h2))
+    for b in core.beneficios_acumulados(nivel_beneficios):
         # "-" em vez de bullet unicode (•) - fontes base do reportlab (Helvetica) nem sempre tem
         # esse glifo, mesmo problema documentado pra emoji/simbolos fora do Latin-1.
         story.append(Paragraph(f"-  {b}", beneficio_style))
+    if int(nivel_pagamento) != int(nivel_beneficios):
+        story.append(Paragraph(
+            f"O aumento no valor do plantão já é o do Nível {int(nivel_pagamento)} desde já "
+            f"(não espera carência). Os benefícios extras do Nível {int(nivel_pagamento)} (seguro, "
+            "cursos, licenças) liberam assim que a carência desse nível for cumprida.",
+            ParagraphStyle("CaveatBeneficios", parent=styles["Normal"], fontSize=8.5,
+                            textColor=cor_texto_leve, spaceBefore=4),
+        ))
 
     if proximo_nivel_info:
         story.append(Paragraph("Alcance o próximo nível ainda este mês", h2))

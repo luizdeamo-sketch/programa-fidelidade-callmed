@@ -7,11 +7,18 @@ documento de referencia completo, aprovado pelo usuario):
 - 4 niveis por medico, mensal, por volume de plantoes clinicos validos (exclui Coordenacao/
   Gestao/ASSIST.ADM do volume, exclui hospitais fora do escopo e tipos de unidade fora do
   escopo - ver EXCLUSAO_HOSPITAIS/EXCLUSAO_LOCAL_REGEX).
-- Carencia: meses CONSECUTIVOS cumprindo o criterio do nivel antes do beneficio comecar a valer
-  (formula: carencia_meses[nivel] + 1 meses seguidos == beneficio ativo). Se o medico cai do
-  nivel em qualquer mes da janela, o contador daquele nivel reseta.
+- Carencia (CORRIGIDO 2026-08-20, esclarecido pelo usuario): meses CONSECUTIVOS cumprindo o
+  criterio do nivel so valem pra liberar os BENEFICIOS extras daquele nivel (seguro, reembolso
+  de curso, licenca, etc. - ver BENEFICIOS_NIVEL) - carencia de 2 meses pro Nivel 2, 4 meses pro
+  Nivel 3, 6 meses pro Nivel 4 (formula: carencia_meses[nivel] + 1 meses seguidos == beneficio
+  ativo; cai do nivel em qualquer mes da janela e o contador daquele nivel reseta). O AUMENTO NO
+  VALOR DO PLANTAO (pagamento) NAO espera carencia - vale imediatamente com base no volume do
+  proprio mes (nivel_bruto). Antes dessa correcao o codigo usava o nivel com carencia
+  (nivel_vestido) pra calcular tambem o pagamento, o que segurava o aumento indevidamente (bug
+  real encontrado pelo usuario: medico com 22 plantoes/mes, volume mais que suficiente pro Nivel
+  4, aparecia preso no Nivel 2 na tela por causa da carencia).
 - Coordenadores (qualquer mes com pagamento tipo Coordenacao/Gestao) tem Nivel 4 automatico
-  naquele mes, sem precisar de volume nem carencia.
+  naquele mes, sem precisar de volume nem carencia (pagamento E beneficios, os dois).
 - Backfill: o sistema calcula o historico completo desde o inicio da base ate o mes mais
   recente, entao em Setembro/2026 (GO_LIVE) cada medico ja "nasce" no nivel/carencia real que
   o historico dele sustenta - ninguem comeca do zero por definicao de codigo.
@@ -66,12 +73,17 @@ SEP_OP_ESP = " :: "
 NIVEIS = [
     # min_fds = minimo de FDS(Sab/Dom) + Noturno somados (uniao) - valores confirmados pelo
     # usuario em 2026-08-20 (exemplo real: medico com 19 plantoes precisa de min. 4).
+    # carencia_meses so afeta os BENEFICIOS extras (seguro, curso, licenca - tem_seguro/
+    # BENEFICIOS_NIVEL), NAO o pct_aumento do pagamento, que vale imediato por volume
+    # (esclarecido pelo usuario 2026-08-20 - ver docstring do modulo). Valores de carencia
+    # corrigidos no mesmo dia: Nivel 2 era 1 mes, virou 2; Nivel 3 era 3 meses, virou 4;
+    # Nivel 4 continua 6.
     {"idx": 1, "nome": "Nível 1", "min_plantoes": 1, "max_plantoes": 9, "min_fds": 0,
      "carencia_meses": 0, "pct_aumento": 0.0, "pct_exibido": 0, "tem_seguro": False},
     {"idx": 2, "nome": "Nível 2", "min_plantoes": 10, "max_plantoes": 14, "min_fds": 3,
-     "carencia_meses": 1, "pct_aumento": 0.0275, "pct_exibido": 3, "tem_seguro": False},
+     "carencia_meses": 2, "pct_aumento": 0.0275, "pct_exibido": 3, "tem_seguro": False},
     {"idx": 3, "nome": "Nível 3", "min_plantoes": 15, "max_plantoes": 19, "min_fds": 4,
-     "carencia_meses": 3, "pct_aumento": 0.0375, "pct_exibido": 4, "tem_seguro": True},
+     "carencia_meses": 4, "pct_aumento": 0.0375, "pct_exibido": 4, "tem_seguro": True},
     {"idx": 4, "nome": "Nível 4", "min_plantoes": 20, "max_plantoes": None, "min_fds": 5,
      "carencia_meses": 6, "pct_aumento": 0.045, "pct_exibido": 5, "tem_seguro": True},
 ]
@@ -533,6 +545,14 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
     custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (reseta
     carencia de nivel 2+, mas nao "sai" do historico).
 
+    IMPORTANTE (corrigido 2026-08-20, esclarecido pelo usuario): 'nivel_bruto' e 'nivel_vestido'
+    tem papeis DIFERENTES agora - nivel_bruto (puro volume/FDS do mes, sem carencia) e quem
+    determina o PAGAMENTO (custo_aumento_pct_mes/pct_aumento_exibido - o aumento no valor do
+    plantao vale na hora, nao espera carencia). nivel_vestido (com carencia aplicada) continua
+    so pra determinar os BENEFICIOS extras (custo_seguro_mes/tem_seguro, e a lista em
+    BENEFICIOS_NIVEL usada no relatorio/PDF) - esses sim esperam a carencia. Antes dessa correcao
+    os dois usavam nivel_vestido, o que segurava indevidamente tambem o pagamento.
+
     'niveis' permite recalcular com parametros customizados (editados na tela de Configuracoes)
     em vez dos parametros padrao aprovados (NIVEIS) - mesmo formato de lista de dicts.
 
@@ -593,9 +613,12 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 if streaks[nivel_check] >= carencia + 1:
                     nivel_vestido = nivel_check
 
+            # info_bruto rege o PAGAMENTO (imediato, por volume) - info_vestido rege so os
+            # BENEFICIOS extras (esperam carencia). Ver docstring da funcao.
+            info_bruto = nivel_por_idx[nivel_bruto]
             info_vestido = nivel_por_idx[nivel_vestido]
             custo_seguro = custo_seguro_mes if info_vestido["tem_seguro"] else 0.0
-            custo_aumento_pct = valor_repasse * info_vestido["pct_aumento"]
+            custo_aumento_pct = valor_repasse * info_bruto["pct_aumento"]
             valor_total_geral = valor_repasse + custo_aumento_pct
 
             resultados.append({
@@ -604,7 +627,12 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 "n_fds_ou_noturno": n_fds_ou_noturno, "teve_coordenacao": teve_coord,
                 "valor_repasse": valor_repasse,
                 "nivel_bruto": nivel_bruto, "nivel_vestido": nivel_vestido,
-                "pct_aumento_exibido": info_vestido["pct_exibido"],
+                "pct_aumento_exibido": info_bruto["pct_exibido"],
+                # streak_nivel_bruto = meses consecutivos que o volume sustenta PELO MENOS o
+                # nivel_bruto atual (None no Nivel 1, que e o piso e nao tem streak) - usado como
+                # "tempo no nivel atual" de PAGAMENTO (sem desconto de carencia, diferente de
+                # tempo_no_nivel_atual() abaixo, que e sobre o nivel_vestido/beneficios).
+                "streak_nivel_bruto": streaks[nivel_bruto] if nivel_bruto >= 2 else None,
                 "streak_n2": streaks[2], "streak_n3": streaks[3], "streak_n4": streaks[4],
                 "custo_seguro_mes": custo_seguro, "custo_aumento_pct_mes": custo_aumento_pct,
                 "valor_total_geral": valor_total_geral,
@@ -737,9 +765,11 @@ def beneficios_acumulados(nivel):
 
 
 def tempo_no_nivel_atual(row, niveis=None):
-    """Quantos meses o BENEFICIO do nivel vigente esta realmente ativo (streak do nivel menos a
-    carencia que ja foi cumprida pra ele valer) - diferente do streak bruto, que conta tambem os
-    meses "gastos" na propria carencia. Nivel 1 nao tem streak/carencia (e o piso), retorna None."""
+    """Quantos meses o BENEFICIO (seguro, curso, licenca - nao o pagamento, ver calcular_niveis)
+    do nivel_vestido esta realmente ativo (streak do nivel menos a carencia que ja foi cumprida
+    pra ele valer) - diferente do streak bruto, que conta tambem os meses "gastos" na propria
+    carencia. Nivel 1 nao tem streak/carencia (e o piso), retorna None. Pro "tempo no nivel
+    atual" de PAGAMENTO (sem desconto de carencia), usar o campo streak_nivel_bruto direto."""
     niveis = niveis or NIVEIS
     nivel_vestido = int(row["nivel_vestido"])
     if nivel_vestido < 2:
@@ -747,3 +777,13 @@ def tempo_no_nivel_atual(row, niveis=None):
     carencia = niveis_para_dict(niveis)[nivel_vestido]["carencia_meses"]
     streak = int(row.get(f"streak_n{nivel_vestido}", 0))
     return max(1, streak - carencia)
+
+
+def meses_por_nivel(hist_medico, campo="nivel_bruto"):
+    """Conta quantos meses (nao necessariamente consecutivos) o medico passou em cada nivel ao
+    longo de todo o historico disponivel (hist_medico = niveis_df filtrado por 1 medico, jah
+    ordenado ou nao - nao importa aqui). Usa nivel_bruto por padrao (nivel de PAGAMENTO, sem
+    carencia) - pedido do usuario 2026-08-20, pra mostrar no relatorio "quantos meses ele ficou
+    em cada nivel". Passe campo='nivel_vestido' se precisar da contagem por nivel de BENEFICIOS."""
+    contagem = hist_medico[campo].value_counts().to_dict()
+    return {n: int(contagem.get(n, 0)) for n in (1, 2, 3, 4)}

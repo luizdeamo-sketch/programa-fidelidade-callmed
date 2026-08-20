@@ -154,15 +154,32 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             f"({atual_rel['anomes']})."
         )
 
-    nivel_vestido_rel = int(atual_rel["nivel_vestido"])
-    info_nivel_rel = core.NIVEL_POR_IDX[nivel_vestido_rel]
-    tempo_nivel_rel = core.tempo_no_nivel_atual(atual_rel)
+    # nivel_pagamento (nivel_bruto) rege o % de aumento no plantao - vale na hora, sem carencia
+    # (esclarecido pelo usuario 2026-08-20). nivel_beneficios (nivel_vestido) so rege os
+    # BENEFICIOS extras (seguro, curso, licenca), que ainda esperam a carencia - ver docstring de
+    # core.calcular_niveis().
+    nivel_pagamento_rel = int(atual_rel["nivel_bruto"])
+    info_pagamento_rel = core.NIVEL_POR_IDX[nivel_pagamento_rel]
+    nivel_beneficios_rel = int(atual_rel["nivel_vestido"])
+    info_beneficios_rel = core.NIVEL_POR_IDX[nivel_beneficios_rel]
+    tempo_nivel_pagamento_rel = atual_rel["streak_nivel_bruto"]
+    tempo_nivel_pagamento_rel = (
+        int(tempo_nivel_pagamento_rel) if pd.notna(tempo_nivel_pagamento_rel) else None
+    )
     prox_info_rel = core.proximo_nivel_info(atual_rel)
     primeiro_mes_rel = hist_rel["anomes"].min()
     # hist_rel ja tem 1 linha por mes desde o primeiro plantao do medico ate o mes mais recente da
     # base inteira (meses sem plantao viram linha com 0, pra carencia funcionar certo - ver
     # calcular_niveis) - entao len(hist_rel) e literalmente "quantos meses de casa", sem gap.
     tempo_de_casa_rel = len(hist_rel)
+    meses_por_nivel_rel = core.meses_por_nivel(hist_rel)
+
+    # Especialidade predominante do medico (pedido do usuario 2026-08-20, mostrar do lado do
+    # nome) - moda entre TODOS os plantoes dele na base (nao so o mes de referencia), pra nao
+    # oscilar mes a mes por causa de um plantao avulso fora da especialidade principal.
+    especialidades_medico_rel = df_linhas.loc[df_linhas["medico"] == nome_medico, "especialidade"]
+    moda_especialidade_rel = especialidades_medico_rel.mode()
+    especialidade_rel = moda_especialidade_rel.iat[0] if not moda_especialidade_rel.empty else "—"
 
     # Projecao financeira de bater o proximo nivel ainda este mes (pedido do usuario, pra engajar
     # o medico): usa o ticket medio por plantao do proprio mes pra estimar o valor de repasse SE
@@ -200,14 +217,45 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
 
     # ---------------------------------------------------------- ABA SISTEMA (interna)
     with aba_sistema:
+        st.markdown(
+            f"### {nome_medico} &nbsp; "
+            f"<span style='color:#6B7280;font-weight:400;font-size:0.7em'>{especialidade_rel}</span>",
+            unsafe_allow_html=True,
+        )
         m1, m2, m3, m4 = st.columns(4)
-        m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_vestido_rel)}", unsafe_allow_html=True)
+        m1.markdown(
+            f"**Nível vigente (pagamento)**<br>{badge_nivel(nivel_pagamento_rel)}",
+            unsafe_allow_html=True,
+        )
         m2.metric("Tempo de casa", f"{tempo_de_casa_rel} mês(es)", help=f"Desde {primeiro_mes_rel}")
         m3.metric(
             "Tempo no nível atual",
-            f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+            f"{tempo_nivel_pagamento_rel} mês(es)" if tempo_nivel_pagamento_rel is not None else "—",
+            help="Meses consecutivos que o volume sustenta esse nível - vale pro pagamento na hora, "
+                 "sem esperar carência.",
         )
-        m4.metric("Aumento no plantão", f"{info_nivel_rel['pct_exibido']}%")
+        m4.metric("Aumento no plantão", f"{info_pagamento_rel['pct_exibido']}%")
+
+        st.caption(
+            "Meses em cada nível (histórico completo, desde "
+            f"{primeiro_mes_rel}): Nível 1: {meses_por_nivel_rel[1]} · Nível 2: "
+            f"{meses_por_nivel_rel[2]} · Nível 3: {meses_por_nivel_rel[3]} · "
+            f"Nível 4: {meses_por_nivel_rel[4]}."
+        )
+
+        # Carencia (2/4/6 meses pra N2/N3/N4) so segura os BENEFICIOS extras (seguro, curso,
+        # licenca), nao o pagamento - esclarecido pelo usuario 2026-08-20. Se o nivel de
+        # pagamento (volume) ja passou do nivel de beneficios (carencia ainda não cumprida),
+        # avisa aqui pra não confundir o escalista/médico.
+        if nivel_pagamento_rel != nivel_beneficios_rel:
+            carencia_necessaria_rel = core.NIVEL_POR_IDX[nivel_pagamento_rel]["carencia_meses"]
+            st.info(
+                f"O pagamento já está no **Nível {nivel_pagamento_rel}** "
+                f"({info_pagamento_rel['pct_exibido']}% de aumento) — não espera carência. Mas os "
+                f"**benefícios extras** desse nível (seguro, cursos, licenças) só liberam depois de "
+                f"**{carencia_necessaria_rel} mês(es) consecutivos** nesse volume; hoje os benefícios "
+                f"ativos ainda são os do **Nível {nivel_beneficios_rel}**."
+            )
 
         st.markdown("---")
         renderizar_simulacao_niveis(atual_rel)
@@ -287,8 +335,8 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
                           "nivel_vestido", "valor_repasse", "valor_total_geral"]]
                 .rename(columns={
                     "anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
-                    "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
-                    "nivel_vestido": "Nível (vigente)", "valor_repasse": "Valor Plantões",
+                    "n_noturno": "Noturno", "nivel_bruto": "Nível (pagamento)",
+                    "nivel_vestido": "Nível (benefícios)", "valor_repasse": "Valor Plantões",
                     "valor_total_geral": "Total Geral",
                 })
                 .style.format({"Valor Plantões": fmt_brl, "Total Geral": fmt_brl}),
@@ -301,19 +349,27 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             "Versão pronta pra compartilhar com o médico — sem os custos internos pagos pela empresa."
         )
         st.markdown(
-            f"### Nível {nivel_vestido_rel} — {info_nivel_rel['pct_exibido']}% de aumento no plantão"
+            f"### Nível {nivel_pagamento_rel} — {info_pagamento_rel['pct_exibido']}% de aumento no plantão"
         )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Plantões no mês", int(atual_rel["n_plantoes"]))
         c2.metric("FDS/Noturno", int(atual_rel["n_fds_ou_noturno"]))
         c3.metric(
-            "Tempo no nível", f"{tempo_nivel_rel} mês(es)" if tempo_nivel_rel is not None else "—",
+            "Tempo no nível",
+            f"{tempo_nivel_pagamento_rel} mês(es)" if tempo_nivel_pagamento_rel is not None else "—",
         )
         c4.metric("Tempo com a CallMed", f"{tempo_de_casa_rel} mês(es)")
 
         st.markdown("##### Benefícios inclusos")
-        for beneficio in core.beneficios_acumulados(nivel_vestido_rel):
+        for beneficio in core.beneficios_acumulados(nivel_beneficios_rel):
             st.markdown(f"- {beneficio}")
+        if nivel_pagamento_rel != nivel_beneficios_rel:
+            st.caption(
+                f"Os benefícios acima são os do Nível {nivel_beneficios_rel} (tempo de carência já "
+                f"cumprido). O aumento no valor do plantão já é o do Nível {nivel_pagamento_rel} "
+                "desde já — os benefícios extras desse nível liberam em breve, sem precisar de "
+                "nenhum plantão a mais."
+            )
 
         if prox_info_rel:
             partes_rel = []
@@ -355,12 +411,13 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             for _, row in plantoes_contados_rel.iterrows()
         ]
         pdf_bytes_rel = comunicado_pdf.gerar_pdf_comunicado(
-            nome_medico=nome_medico, mes_ref=mes_referencia, nivel_vestido=nivel_vestido_rel,
+            nome_medico=nome_medico, mes_ref=mes_referencia, nivel_pagamento=nivel_pagamento_rel,
+            nivel_beneficios=nivel_beneficios_rel, especialidade=especialidade_rel,
             n_plantoes=int(atual_rel["n_plantoes"]), n_fds=int(atual_rel["n_fds"]),
-            n_noturno=int(atual_rel["n_noturno"]), pct_aumento_exibido=info_nivel_rel["pct_exibido"],
+            n_noturno=int(atual_rel["n_noturno"]), pct_aumento_exibido=info_pagamento_rel["pct_exibido"],
             plantoes_detalhe=plantoes_detalhe_rel, valor_total_plantoes=atual_rel["valor_repasse"],
             valor_bonificacao=atual_rel["custo_aumento_pct_mes"],
-            tempo_no_nivel=tempo_nivel_rel, proximo_nivel_info=prox_info_rel,
+            tempo_no_nivel=tempo_nivel_pagamento_rel, proximo_nivel_info=prox_info_rel,
             tempo_de_casa=tempo_de_casa_rel, historico_mensal=historico_mensal_rel,
         )
         st.download_button(
@@ -766,6 +823,11 @@ if pagina == "⚙️ Regras do Programa":
 
     # ---------------------------------------------------------- NÍVEIS, CARÊNCIA, % AUMENTO
     st.markdown("#### Níveis, carência e % de aumento no plantão")
+    st.caption(
+        "A carência só segura os **benefícios extras** do nível (seguro a partir do Nível 3, "
+        "cursos, licenças) — o **% de aumento no plantão** vale imediato, pelo volume do próprio "
+        "mês, sem esperar carência (esclarecido pelo usuário, 2026-08-20)."
+    )
     if st.session_state.pop("sucesso_config", False):
         st.success("Parâmetros aplicados — histórico recalculado com as novas regras.")
     if st.session_state.pop("avisos_config", None):
@@ -959,15 +1021,20 @@ if c1.button("Ver todos →", key="btn_total", use_container_width=True):
     st.session_state["filtro_nivel_ms"] = [1, 2, 3, 4]
     st.rerun()
 for n, col in zip((1, 2, 3, 4), (c2, c3, c4, c5)):
-    col.metric(f"Nível {n}", int((snap["nivel_vestido"] == n).sum()))
+    col.metric(f"Nível {n}", int((snap["nivel_bruto"] == n).sum()))
     if col.button("Ver lista →", key=f"btn_nivel_{n}", use_container_width=True):
         st.session_state["filtro_nivel_ms"] = [n]
         st.rerun()
 
-st.markdown("#### Custo mensal projetado (nível vestido atual)")
+st.markdown("#### Custo mensal projetado")
+st.caption(
+    "Aumento % no repasse já reflete o nível de pagamento (por volume, sem carência). Seguros só "
+    "contam pros médicos que já cumpriram a carência do Nível 3+ (nível de benefícios) - ver "
+    "coluna 'Faltam p/ próximo nível' na tabela abaixo pra quem ainda está no período de carência."
+)
 cc1, cc2, cc3 = st.columns(3)
-cc1.metric("Seguros (N3+)", fmt_brl(snap["custo_seguro_mes"].sum()))
-cc2.metric("Aumento % no repasse", fmt_brl(snap["custo_aumento_pct_mes"].sum()))
+cc1.metric("Seguros (N3+, benefícios liberados)", fmt_brl(snap["custo_seguro_mes"].sum()))
+cc2.metric("Aumento % no repasse (pagamento)", fmt_brl(snap["custo_aumento_pct_mes"].sum()))
 cc3.metric("Total", fmt_brl(snap["custo_seguro_mes"].sum() + snap["custo_aumento_pct_mes"].sum()))
 
 st.markdown("---")
@@ -977,8 +1044,8 @@ st.caption(
     "de cada nível soma FDS + Noturno (sem contar duas vezes o mesmo plantão)."
 )
 filtro_nivel = st.multiselect("Filtrar por nível", [1, 2, 3, 4], key="filtro_nivel_ms")
-tabela = snap[snap["nivel_vestido"].isin(filtro_nivel)].sort_values(
-    ["nivel_vestido", "n_plantoes"], ascending=[False, False]
+tabela = snap[snap["nivel_bruto"].isin(filtro_nivel)].sort_values(
+    ["nivel_bruto", "n_plantoes"], ascending=[False, False]
 )
 
 
@@ -1003,12 +1070,12 @@ def _resumo_faltam_proximo_nivel(row):
 tabela = tabela.assign(faltam_proximo_nivel=tabela.apply(_resumo_faltam_proximo_nivel, axis=1))
 st.caption("Clique numa linha pra abrir o relatório completo do médico logo abaixo.")
 evento_tabela_medicos = st.dataframe(
-    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_vestido",
+    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto",
             "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral",
             "faltam_proximo_nivel"]]
     .rename(columns={
         "medico": "Médico", "n_plantoes": "Total Plantões", "n_fds": "FDS (Sáb/Dom)",
-        "n_noturno": "Noturno", "nivel_vestido": "Nível",
+        "n_noturno": "Noturno", "nivel_bruto": "Nível",
         "pct_aumento_exibido": "% Aumento", "valor_repasse": "Valor Plantões",
         "custo_aumento_pct_mes": "Valor Aumento", "valor_total_geral": "Total Geral",
         "faltam_proximo_nivel": "Faltam p/ próximo nível",
@@ -1039,20 +1106,45 @@ nome = st.selectbox("Nome completo", [""] + medicos_lista)
 if nome:
     hist = niveis_df[niveis_df["medico"] == nome].sort_values("anomes")
     atual = hist.iloc[-1]
-    info_nivel = core.NIVEL_POR_IDX[int(atual["nivel_vestido"])]
+    nivel_pagamento_c = int(atual["nivel_bruto"])
+    info_nivel_c = core.NIVEL_POR_IDX[nivel_pagamento_c]
+    nivel_beneficios_c = int(atual["nivel_vestido"])
+    tempo_nivel_c = atual["streak_nivel_bruto"]
+    tempo_nivel_c = int(tempo_nivel_c) if pd.notna(tempo_nivel_c) else None
+    meses_por_nivel_c = core.meses_por_nivel(hist)
+    especialidades_c = df_linhas.loc[df_linhas["medico"] == nome, "especialidade"]
+    moda_especialidade_c = especialidades_c.mode()
+    especialidade_c = moda_especialidade_c.iat[0] if not moda_especialidade_c.empty else "—"
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.markdown(f"**Nível vigente**<br>{badge_nivel(int(atual['nivel_vestido']))}", unsafe_allow_html=True)
-    m2.metric("Total de plantões", int(atual["n_plantoes"]))
-    m3.metric("FDS (Sáb/Dom)", int(atual["n_fds"]))
-    m4.metric("Noturno", int(atual["n_noturno"]))
-    m5.metric("Aumento no valor do plantão", f"{info_nivel['pct_exibido']}%")
+    st.markdown(
+        f"##### {nome} &nbsp; "
+        f"<span style='color:#6B7280;font-weight:400;font-size:0.75em'>{especialidade_c}</span>",
+        unsafe_allow_html=True,
+    )
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_pagamento_c)}", unsafe_allow_html=True)
+    m2.metric("Tempo de casa", f"{len(hist)} mês(es)", help=f"Desde {hist['anomes'].min()}")
+    m3.metric(
+        "Tempo no nível atual",
+        f"{tempo_nivel_c} mês(es)" if tempo_nivel_c is not None else "—",
+    )
+    m4.metric("Total de plantões", int(atual["n_plantoes"]))
+    m5.metric("FDS + Noturno", int(atual["n_fds_ou_noturno"]))
+    m6.metric("Aumento no valor do plantão", f"{info_nivel_c['pct_exibido']}%")
 
-    if int(atual["nivel_bruto"]) != int(atual["nivel_vestido"]):
+    st.caption(
+        "Meses em cada nível (histórico completo): "
+        f"Nível 1: {meses_por_nivel_c[1]} · Nível 2: {meses_por_nivel_c[2]} · "
+        f"Nível 3: {meses_por_nivel_c[3]} · Nível 4: {meses_por_nivel_c[4]}."
+    )
+
+    if nivel_pagamento_c != nivel_beneficios_c:
+        carencia_necessaria_c = core.NIVEL_POR_IDX[nivel_pagamento_c]["carencia_meses"]
         st.info(
-            f"O volume deste mês já sustenta o **Nível {atual['nivel_bruto']}**, mas o benefício "
-            f"elevado só passa a valer depois da carência (meses seguidos mantendo o critério). "
-            f"Hoje está com o **Nível {atual['nivel_vestido']}** ativo."
+            f"O pagamento já está no **Nível {nivel_pagamento_c}** ({info_nivel_c['pct_exibido']}% "
+            f"de aumento) — não espera carência. Mas os **benefícios extras** desse nível (seguro, "
+            f"cursos, licenças) só liberam depois de **{carencia_necessaria_c} mês(es) consecutivos** "
+            f"nesse volume; hoje os benefícios ativos ainda são os do **Nível {nivel_beneficios_c}**."
         )
 
     # Simulação "quanto falta pra cada nível acima" (pedido do usuário, 2026-08-20) - função
@@ -1063,8 +1155,8 @@ if nome:
         st.dataframe(
             hist[["anomes", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto", "nivel_vestido"]]
             .rename(columns={"anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
-                              "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
-                              "nivel_vestido": "Nível (vigente)"}),
+                              "n_noturno": "Noturno", "nivel_bruto": "Nível (pagamento)",
+                              "nivel_vestido": "Nível (benefícios)"}),
             use_container_width=True, hide_index=True,
         )
 
