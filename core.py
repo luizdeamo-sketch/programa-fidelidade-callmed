@@ -57,16 +57,6 @@ EXCLUSAO_HOSPITAL_REGEX = re.compile(r"covas|amhemed", re.IGNORECASE)
 # exclui UTI e Enfermaria automaticamente, sem precisar de regra separada pra elas.
 ESPECIALIDADE_VALIDA = "Anestesia"
 
-# Limiar (%) de linhas NAO-Anestesia numa operacao pra considera-la "dominante em anestesia" -
-# achado na auditoria de 2026-08-20 (pedido do usuario): varias operacoes que sao Anestesia quase
-# pura (Mario Covas 6,23%, Ana Costa 0-3,45%, Santa Helena 0-1,61%, etc.) tem uma pontinha de
-# linhas Enfermaria/UTI que o usuario confirmou ser ERRO DE CLASSIFICACAO no relatorio (a
-# operacao so faz Anestesia de verdade). A distribuicao real tem um gap enorme e limpo: as
-# operacoes "sujas por erro" ficam todas abaixo de ~7% de linhas nao-Anestesia, e as operacoes que
-# SAO de verdade multi-especialidade (Sao Bernardo, Notre UTI, Prevent, etc.) ficam todas acima de
-# ~67% - 10% fica bem no meio dessa folga, sem risco de pegar operacao genuinamente mista.
-LIMIAR_PCT_OUTRAS_OPERACAO_ANESTESIA = 10.0
-
 # Separador da chave composta operacao+especialidade usada na tela "Operacoes" (ex.: "Hospital
 # Sao Bernardo :: Anestesia") - precisa ser algo que nao apareca em nome de hospital nem de
 # especialidade real da base.
@@ -108,6 +98,49 @@ def niveis_para_dict(niveis=None):
     return {n["idx"]: n for n in (niveis or NIVEIS)}
 
 
+def carregar_apoio(arquivo=None):
+    """Le a aba 'Apoio' do arquivo de plantoes - tabela de referencia mantida pela area que
+    mapeia cada Local EXATO pro Coordenador responsavel, o 'Setor Definido' (agrupamento correto
+    de hospital/operacao) e a Especialidade correta.
+
+    Achado na auditoria de 2026-08-20 (usuario pediu pra cruzar contra a propria base de
+    plantoes): a coluna 'Especialidade' da aba BD tem erro de classificacao linha a linha - ex.:
+    o mesmo Local exato, no mesmo dia, aparece ora como Enfermaria ora como Anestesia. A aba Apoio
+    e a fonte de verdade oficial (mantida como lookup Local -> Setor/Especialidade), nao a coluna
+    Especialidade da BD - confirmado: BD diverge da Apoio em 4.102 das 181.423 linhas (~2,3%), nos
+    dois sentidos (tanto rotula Enfermaria/UTI como Anestesia quanto o contrario). Cobertura
+    tambem confirmada: 100% dos Local distintos que aparecem na BD tem entrada aqui.
+
+    Bonus: 'Setor Definido' tambem resolve a fragmentacao de nomes que operacao_de() (regex sobre
+    o Local) nao pegava - ex.: 'Ana Costa, Hospital', 'Hospital Ana Costa' e 'Hospital Ana Costa -
+    P2' (o hospital foi renomeado no cadastro em 2025-11, mesma rede) todos caem no mesmo Setor
+    Definido 'Ana Costa Anestesia'."""
+    arquivo = arquivo or cfg.resolver_base_plantoes()
+    wb = load_workbook(arquivo, data_only=True, read_only=True)
+    if "Apoio" not in wb.sheetnames:
+        wb.close()
+        return pd.DataFrame(columns=["local", "coordenador", "setor_definido", "especialidade_apoio"])
+    ws = wb["Apoio"]
+    rows_iter = ws.iter_rows(values_only=True)
+    next(rows_iter)  # cabecalho
+    linhas = []
+    for row in rows_iter:
+        local = row[0] if len(row) > 0 else None
+        if local is None:
+            continue
+        linhas.append({
+            "local": str(local),
+            "coordenador": str(row[1]) if len(row) > 1 and row[1] is not None else "",
+            "setor_definido": str(row[2]) if len(row) > 2 and row[2] is not None else "",
+            "especialidade_apoio": str(row[3]) if len(row) > 3 and row[3] is not None else "",
+        })
+    wb.close()
+    apoio = pd.DataFrame(linhas)
+    if apoio.empty:
+        return apoio
+    return apoio.drop_duplicates("local", keep="first")
+
+
 def carregar_plantoes(arquivo=None):
     """Le a base BD de plantoes (aba 'BD', formato "1.ANALISES LUIZ": colunas deslocadas +1 em
     relacao ao arquivo antigo do Desktop, com a coluna extra 'Especialidade' no fim) e retorna
@@ -135,7 +168,7 @@ def carregar_plantoes(arquivo=None):
             "data_raw": data_raw,
             "local": local_s,
             "tipo": str(tipo or ""),
-            "especialidade": str(especialidade or ""),
+            "especialidade_bd": str(especialidade or ""),
             "valor": float(valor),
         })
     wb.close()
@@ -159,45 +192,36 @@ def carregar_plantoes(arquivo=None):
     df["eh_fds_ou_noturno"] = df["eh_fds"] | df["eh_noturno"]
     df["eh_gestao"] = df["tipo"].isin(GESTAO_TIPOS)
     df["eh_tipo_nao_clinico"] = df["tipo"].isin(TIPOS_NAO_CONTAM_VOLUME)
-    df["operacao"] = df["local"].apply(operacao_de)
-    df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
+    df["operacao_bd"] = df["local"].apply(operacao_de)
 
-    # Correcao de erro de classificacao (auditoria 2026-08-20, regra dada pelo usuario): se uma
-    # operacao e dominante em Anestesia (poucas linhas Enfermaria/UTI perdidas no meio - a
-    # operacao "so faz Anestesia" na pratica), trata essas linhas minoritarias como Anestesia
-    # tambem, porque o mais provavel e que vieram com a especialidade errada no relatorio. So se
-    # aplica a Enfermaria/UTI (o que o usuario citou) - Adm/Ambulatorio minoritarios continuam
-    # como estao, sao outra natureza de linha (normalmente pagamento administrativo mesmo).
-    contagem_por_operacao = df.groupby("operacao")["especialidade"].value_counts().unstack(fill_value=0)
-    total_por_operacao = contagem_por_operacao.sum(axis=1)
-    anestesia_por_operacao = contagem_por_operacao.get(ESPECIALIDADE_VALIDA, 0)
-    pct_outras_por_operacao = (total_por_operacao - anestesia_por_operacao) / total_por_operacao * 100
-    operacoes_dominantes_anestesia = set(
-        pct_outras_por_operacao[pct_outras_por_operacao < LIMIAR_PCT_OUTRAS_OPERACAO_ANESTESIA].index
-    )
-    eh_operacao_dominante_anestesia = df["operacao"].isin(operacoes_dominantes_anestesia)
-    eh_provavel_erro_especialidade = eh_operacao_dominante_anestesia & df["especialidade"].isin(
-        {"Enfermaria", "UTI"}
-    )
-    # "especialidade_efetiva" = especialidade real, exceto pelas linhas corrigidas acima - e o que
-    # o resto do pipeline (eh_anestesia, chave_operacao, listar_operacoes) usa a partir daqui,
-    # nunca a coluna "especialidade" crua.
-    df["especialidade_efetiva"] = df["especialidade"].where(
-        ~eh_provavel_erro_especialidade, ESPECIALIDADE_VALIDA
-    )
-    df["eh_anestesia"] = df["especialidade_efetiva"] == ESPECIALIDADE_VALIDA
-    # "chave_operacao" = operacao (hospital/grupo) + especialidade efetiva, ex.: "Hospital Sao
-    # Bernardo :: Anestesia" - granularidade real da tela "Operacoes" (decisao do usuario em
-    # 2026-08-20: um hospital com Anestesia/Enfermaria/UTI vira ate 3 linhas flegaveis
-    # separadamente, nao 1 so - exceto quando a correcao acima ja juntou tudo em Anestesia).
-    especialidade_disp = df["especialidade_efetiva"].replace("", "(sem especialidade)")
+    # Junta com a aba Apoio - fonte de verdade pro Setor Definido (operacao) e Especialidade, ver
+    # carregar_apoio(). "operacao"/"especialidade" daqui em diante SAO as versoes corrigidas
+    # (Apoio) - "operacao_bd"/"especialidade_bd" ficam guardadas so pra auditoria/transparencia
+    # (tela "Por que esses plantoes contam"), nunca usadas no calculo de nivel.
+    apoio = carregar_apoio(arquivo)
+    if not apoio.empty:
+        df = df.merge(apoio, on="local", how="left")
+    else:
+        df["setor_definido"] = None
+        df["especialidade_apoio"] = None
+        df["coordenador"] = None
+    # Fallback conservador pra Local sem entrada na Apoio (cobertura hoje e 100%, mas protege
+    # contra um Local novo aparecer numa atualizacao futura da BD sem a Apoio ter acompanhado) -
+    # cai pro agrupamento por regex + Especialidade da propria BD, e fica marcado pra tela avisar.
+    df["sem_match_apoio"] = df["setor_definido"].isna() | (df["setor_definido"] == "")
+    df["operacao"] = df["setor_definido"].where(~df["sem_match_apoio"], df["operacao_bd"])
+    df["especialidade"] = df["especialidade_apoio"].where(~df["sem_match_apoio"], df["especialidade_bd"])
+
+    df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
+    df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
+    # "chave_operacao" = operacao (Setor Definido) + especialidade (Apoio), ex.: "Ana Costa
+    # Anestesia :: Anestesia" - granularidade real da tela "Operacoes".
+    especialidade_disp = df["especialidade"].replace("", "(sem especialidade)")
     df["chave_operacao"] = df["operacao"] + SEP_OP_ESP + especialidade_disp
-    # plantao valido = conta pro volume do nivel: especialidade Anestesia, hospital nao excluido,
-    # e nao e pagamento de gestao/coordenacao (isso conta separado, pra flag de coordenador). Este
-    # e o padrao default (regex fixo, so Anestesia) - a tela "Operacoes" permite substituir esse
-    # filtro por uma lista customizada de chave_operacao via aplicar_operacoes_customizadas(),
-    # sem precisar reler o Excel - inclusive liberando especialidades fora de Anestesia se o
-    # master decidir flegar.
+    # plantao valido = conta pro volume do nivel: especialidade Anestesia (Apoio), hospital nao
+    # excluido, e nao e pagamento de gestao/coordenacao nem tipo nao-clinico. Este e o padrao
+    # default - a tela "Operacoes" permite substituir esse filtro por uma lista customizada de
+    # chave_operacao via aplicar_operacoes_customizadas(), sem precisar reler o Excel.
     df["conta_pro_nivel"] = (
         df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
         & (~df["eh_tipo_nao_clinico"])
@@ -213,21 +237,18 @@ def operacao_de(local):
 
 
 def listar_operacoes(df):
-    """Lista as combinacoes distintas de (operacao, especialidade EFETIVA) encontradas na base -
-    cada uma e uma linha flegavel separada na tela de Configuracoes > Operacoes (ex.: 'Hospital
-    Sao Bernardo' com Anestesia/Enfermaria/UTI vira 3 linhas, nao 1 com 'especialidades vistas'
-    numa lista - decisao do usuario em 2026-08-20, pra poder incluir/excluir cada combinacao por
-    si). Usa especialidade_efetiva (nao a crua) - operacoes dominantes em Anestesia com
-    Enfermaria/UTI minoritarios ja aparecem com tudo junto como uma linha so de Anestesia (a
-    correcao de erro de classificacao ja rodou em carregar_plantoes)."""
+    """Lista as combinacoes distintas de (operacao, especialidade) encontradas na base - operacao
+    e especialidade ja sao as versoes corrigidas pela aba Apoio (ver carregar_apoio()), nao a
+    coluna Especialidade crua da BD nem o agrupamento por regex. Cada combinacao e uma linha
+    flegavel separada na tela de Configuracoes > Operacoes."""
     colunas_vazias = ["chave_operacao", "operacao", "especialidade", "total_linhas", "conta_hoje",
                        "incluida_padrao"]
     if df.empty:
         return pd.DataFrame(columns=colunas_vazias)
-    resumo = df.groupby(["chave_operacao", "operacao", "especialidade_efetiva"]).agg(
+    resumo = df.groupby(["chave_operacao", "operacao", "especialidade"]).agg(
         total_linhas=("valor", "count"),
         conta_hoje=("conta_pro_nivel", "sum"),
-    ).reset_index().rename(columns={"especialidade_efetiva": "especialidade"})
+    ).reset_index()
     resumo["especialidade"] = resumo["especialidade"].replace("", "(sem especialidade)")
     resumo["incluida_padrao"] = resumo["conta_hoje"] > 0
     return resumo.sort_values(["operacao", "especialidade"])

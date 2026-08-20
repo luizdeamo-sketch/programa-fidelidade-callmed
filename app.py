@@ -560,40 +560,43 @@ if pagina == "📄 Relatório do Médico":
 
             # Transparencia sobre POR QUE cada linha conta (ou nao) - pedido do usuario apos notar
             # um medico (Sergio Gratão) com plantao contando pro programa sem ser anestesista de
-            # verdade. Mostra a combinacao operacao+especialidade por tras de cada linha, se ela
-            # esta habilitada na tela Operacoes hoje, e avisa quando a especialidade EFETIVA usada
-            # no calculo (que pode ter sido corrigida pela regra de "operacao dominante em
-            # anestesia") difere da especialidade crua do relatorio original.
+            # verdade. Desde 2026-08-20 o sistema cruza contra a aba "Apoio" do proprio arquivo de
+            # plantoes (fonte de verdade oficial pro Setor Definido/Especialidade, mantida pela
+            # area - ver core.carregar_apoio()) em vez de confiar na coluna Especialidade da BD,
+            # que tem erro de classificacao linha a linha. Essa tabela mostra a comparacao.
             with st.expander("🔍 Por que esses plantões contam (ou não) pro programa?"):
                 resumo_combos = (
-                    plantoes_mes_rel.groupby(["operacao", "especialidade", "especialidade_efetiva",
-                                               "chave_operacao"])
+                    plantoes_mes_rel.groupby(["operacao_bd", "especialidade_bd", "operacao",
+                                               "especialidade", "chave_operacao", "sem_match_apoio"])
                     .agg(linhas=("valor", "count"), conta=("conta_pro_nivel", "sum"))
                     .reset_index()
                 )
                 resumo_combos["Habilitada em Operações"] = ~resumo_combos["chave_operacao"].isin(
                     st.session_state["operacoes_excluidas"]
                 )
-                resumo_combos["Especialidade corrigida?"] = (
-                    resumo_combos["especialidade"] != resumo_combos["especialidade_efetiva"]
+                resumo_combos["Divergia do relatório original?"] = (
+                    resumo_combos["especialidade_bd"] != resumo_combos["especialidade"]
                 )
                 st.dataframe(
-                    resumo_combos[["operacao", "especialidade", "especialidade_efetiva", "linhas",
-                                    "conta", "Habilitada em Operações", "Especialidade corrigida?"]]
+                    resumo_combos[["operacao", "especialidade", "especialidade_bd", "linhas",
+                                    "conta", "Habilitada em Operações", "Divergia do relatório original?",
+                                    "sem_match_apoio"]]
                     .rename(columns={
-                        "operacao": "Operação", "especialidade": "Especialidade (relatório)",
-                        "especialidade_efetiva": "Especialidade (usada no cálculo)",
+                        "operacao": "Operação (Apoio)", "especialidade": "Especialidade (Apoio)",
+                        "especialidade_bd": "Especialidade (relatório original)",
                         "linhas": "Linhas no mês", "conta": "Contaram",
+                        "sem_match_apoio": "Sem correspondência na aba Apoio",
                     }),
                     use_container_width=True, hide_index=True,
                 )
                 st.caption(
-                    "Se uma combinação está com 'Habilitada em Operações' desmarcada, é possível "
-                    "excluir esse médico do programa desmarcando ela na tela 🏥 Operações — sem "
-                    "precisar mexer em nada específico dele. 'Especialidade corrigida?' marcado "
-                    "significa que a linha veio como Enfermaria/UTI no relatório original mas foi "
-                    "tratada como Anestesia porque a operação é dominante em Anestesia (ver regra "
-                    "em Programa_Constelacao_CallMed_v2.md, seção 4)."
+                    "Operação/Especialidade vêm da aba 'Apoio' do arquivo de plantões (fonte de "
+                    "verdade oficial mantida pela área), não da coluna Especialidade lançada na "
+                    "aba BD — essa diverge da Apoio em ~2,3% das linhas da base inteira. Se uma "
+                    "combinação está com 'Habilitada em Operações' desmarcada, é possível excluir "
+                    "esse médico do programa desmarcando ela na tela 🏥 Operações. 'Sem "
+                    "correspondência na aba Apoio' marcado é alerta de dado novo — o Local não "
+                    "está cadastrado lá ainda, o sistema caiu num critério de reserva menos confiável."
                 )
 
         st.markdown("#### Bônus e custos do mês")
