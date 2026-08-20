@@ -31,6 +31,19 @@ GO_LIVE = "2026-09"
 PLACEHOLDERS_MEDICO = {"<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm"}
 GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
 
+# Tipos de pagamento que NAO sao plantao clinico novo - bonus/premiacao/adiantamento de um plantao
+# que ja tem sua propria linha com Tipo normal em algum lugar. Achado na auditoria de 2026-08-20:
+# "Antecipacao" bate com o proprio beneficio documentado do programa ("antecipacao de valores de
+# plantao, pago ate 2 dias apos o plantao" - Nivel 1), ou seja, e o MESMO plantao pago cedo, nao
+# um plantao a mais. "Callmed Premium" bate com o nome do proprio programa (pagamento do premio de
+# fidelidade entrando como linha de "plantao"). Confirmado pelo usuario: excluir todos da
+# contagem de volume/nivel E do valor de repasse (base do % de aumento) - sem isso o medico
+# recebe % de aumento em cima do proprio bonus, e o plantao original conta 2x.
+TIPOS_NAO_CONTAM_VOLUME = {
+    "Antecipação", "Callmed Premium", "Premiação Infiniti", "Bonificação", "Gratificação",
+    ".Quatro Estrelas CallMed", ".Três Estrelas CallMed", ".Duas Estrelas CallMed",
+}
+
 # Hospitais inteiros fora do escopo do programa (qualquer plantao la, de qualquer tipo)
 EXCLUSAO_HOSPITAL_REGEX = re.compile(r"covas|amhemed", re.IGNORECASE)
 # Escopo do programa = "todas as operacoes de ANESTESIA" (confirmado pelo usuario). A base nova
@@ -132,6 +145,7 @@ def carregar_plantoes(arquivo=None):
     # mas se fosse sabado a noite contaria 1 vez so aqui).
     df["eh_fds_ou_noturno"] = df["eh_fds"] | df["eh_noturno"]
     df["eh_gestao"] = df["tipo"].isin(GESTAO_TIPOS)
+    df["eh_tipo_nao_clinico"] = df["tipo"].isin(TIPOS_NAO_CONTAM_VOLUME)
     df["operacao"] = df["local"].apply(operacao_de)
     df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
     df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
@@ -146,7 +160,10 @@ def carregar_plantoes(arquivo=None):
     # filtro por uma lista customizada de chave_operacao via aplicar_operacoes_customizadas(),
     # sem precisar reler o Excel - inclusive liberando especialidades fora de Anestesia se o
     # master decidir flegar.
-    df["conta_pro_nivel"] = df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
+    df["conta_pro_nivel"] = (
+        df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
+        & (~df["eh_tipo_nao_clinico"])
+    )
     return df
 
 
@@ -191,11 +208,16 @@ def aplicar_operacoes_customizadas(df, operacoes_excluidas):
     excluidas (tela de Configuracoes > Operacoes) em vez do filtro fixo (so Anestesia, fora
     EXCLUSAO_HOSPITAL_REGEX). Granularidade agora e por combinacao especifica, entao o master pode
     liberar uma especialidade fora de Anestesia se quiser (ela so nao aparece pre-marcada por
-    padrao). Nao mexe no Excel, so reprocessa o dataframe ja carregado."""
+    padrao). Sempre exclui eh_gestao (coordenacao/gestao) e eh_tipo_nao_clinico (bonus/premiacao/
+    adiantamento - ver TIPOS_NAO_CONTAM_VOLUME) independente da tela de Operacoes, porque esses
+    dois nao sao sobre ESCOPO de hospital/especialidade e sim sobre o que conta como plantao de
+    verdade. Nao mexe no Excel, so reprocessa o dataframe ja carregado."""
     df = df.copy()
     operacoes_excluidas = set(operacoes_excluidas or [])
     df["chave_excluida"] = df["chave_operacao"].isin(operacoes_excluidas)
-    df["conta_pro_nivel"] = (~df["chave_excluida"]) & (~df["eh_gestao"])
+    df["conta_pro_nivel"] = (
+        (~df["chave_excluida"]) & (~df["eh_gestao"]) & (~df["eh_tipo_nao_clinico"])
+    )
     return df
 
 
