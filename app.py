@@ -40,10 +40,11 @@ def agregar_com_operacoes(df_linhas, operacoes_excluidas_tuple):
 
 
 @st.cache_data(ttl=3600, show_spinner="Recalculando níveis com os parâmetros atuais...")
-def calcular_niveis_cached(agg, niveis_json):
-    """Cacheado pelo JSON dos parametros - so recalcula de fato quando os parametros mudam."""
+def calcular_niveis_cached(agg, niveis_json, medicos_gestores_tuple):
+    """Cacheado pelo JSON dos parametros + tupla de gestores manuais - so recalcula de fato
+    quando um dos dois muda."""
     niveis = json.loads(niveis_json)
-    return core.calcular_niveis(agg, niveis=niveis)
+    return core.calcular_niveis(agg, niveis=niveis, medicos_gestores=set(medicos_gestores_tuple))
 
 
 def niveis_para_json(niveis):
@@ -85,32 +86,39 @@ if "niveis_custom" not in st.session_state:
 df_linhas = carregar_linhas_brutas()
 if "operacoes_excluidas" not in st.session_state:
     st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
+if "medicos_gestores" not in st.session_state:
+    st.session_state["medicos_gestores"] = set()
 
 agg = agregar_com_operacoes(df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])))
-niveis_df = calcular_niveis_cached(agg, niveis_para_json(st.session_state["niveis_custom"]))
+niveis_df = calcular_niveis_cached(
+    agg, niveis_para_json(st.session_state["niveis_custom"]),
+    tuple(sorted(st.session_state["medicos_gestores"])),
+)
 if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")
     st.stop()
 
 meses_disponiveis = sorted(niveis_df["anomes"].unique())
-# "slider_mes" e a UNICA fonte de verdade do mes selecionado (mesmo key do widget). Os botoes
+# "mes_atual" e a UNICA fonte de verdade do mes selecionado (mesmo key do widget). Os botoes
 # Anterior/Seguinte SO PODEM mudar esse session_state via on_click (callback roda ANTES do
 # widget ser reinstanciado no proximo run) - setar direto dentro do "if st.button(...):" quebra
 # com StreamlitAPIException ("cannot be modified after the widget... is instantiated"), porque
-# nesse ponto o select_slider da MESMA execucao ja rodou antes. Bug real encontrado e corrigido
-# em 2026-08-20 (tentativas anteriores com value= e com set direto no if-button falharam).
+# nesse ponto o widget de mes da MESMA execucao ja rodou antes. Bug real encontrado e corrigido
+# em 2026-08-20 (tentativas anteriores com value= e com set direto no if-button falharam). O
+# select_slider original virou selectbox no mesmo dia (usuario achou a barra ruim visualmente) -
+# a logica de session_state/callback continua igual, so o widget mudou.
 if (
-    "slider_mes" not in st.session_state
-    or st.session_state["slider_mes"] not in meses_disponiveis
+    "mes_atual" not in st.session_state
+    or st.session_state["mes_atual"] not in meses_disponiveis
 ):
-    st.session_state["slider_mes"] = meses_disponiveis[-1]
+    st.session_state["mes_atual"] = meses_disponiveis[-1]
 
 
 def _ir_mes(delta):
-    idx = meses_disponiveis.index(st.session_state["slider_mes"])
+    idx = meses_disponiveis.index(st.session_state["mes_atual"])
     novo_idx = idx + delta
     if 0 <= novo_idx < len(meses_disponiveis):
-        st.session_state["slider_mes"] = meses_disponiveis[novo_idx]
+        st.session_state["mes_atual"] = meses_disponiveis[novo_idx]
 
 
 with st.sidebar:
@@ -120,11 +128,13 @@ with st.sidebar:
         del st.session_state["usuario"]
         st.rerun()
     st.markdown("---")
-    pagina = st.radio("Navegação", ["📊 Visão Geral", "🏥 Operações"], label_visibility="collapsed")
+    pagina = st.radio(
+        "Navegação", ["📊 Visão Geral", "🏥 Operações", "👔 Gestores"], label_visibility="collapsed"
+    )
     st.markdown("---")
 
-    st.select_slider("📅 Navegar por mês", options=meses_disponiveis, key="slider_mes")
-    idx_atual = meses_disponiveis.index(st.session_state["slider_mes"])
+    st.selectbox("📅 Mês de referência", options=meses_disponiveis, key="mes_atual")
+    idx_atual = meses_disponiveis.index(st.session_state["mes_atual"])
     mcol1, mcol2 = st.columns(2)
     with mcol1:
         st.button("← Anterior", disabled=(idx_atual == 0), use_container_width=True,
@@ -288,9 +298,45 @@ if pagina == "🏥 Operações":
 
     st.stop()
 
+# ============================================================= PÁGINA: GESTORES
+if pagina == "👔 Gestores":
+    st.subheader("👔 Gestores — Nível 4 automático")
+    st.caption(
+        "Médicos marcados aqui entram automaticamente no Nível 4 (aumento no plantão + seguros) "
+        "em TODO o histórico deles, mesmo sem bater o volume mínimo. Funciona **junto com** "
+        "(não substitui) a detecção automática por pagamento de Coordenação/Gestão lançado na "
+        "base — um médico vira Nível 4 se tiver qualquer uma das duas."
+    )
+    if st.session_state.pop("sucesso_gestores", False):
+        st.success("Lista de gestores aplicada — histórico recalculado.")
+
+    medicos_todos = core.listar_medicos(agg)
+    if eh_master:
+        selecionados = st.multiselect(
+            "Médicos gestores",
+            medicos_todos,
+            default=sorted(st.session_state["medicos_gestores"] & set(medicos_todos)),
+            help="Comece a digitar o nome para filtrar a lista.",
+        )
+        if st.button("✅ Aplicar e recalcular", type="primary"):
+            st.session_state["medicos_gestores"] = set(selecionados)
+            st.session_state["sucesso_gestores"] = True
+            st.rerun()
+        if st.button("↩️ Limpar lista"):
+            st.session_state["medicos_gestores"] = set()
+            st.rerun()
+    else:
+        st.caption("Somente leitura — edição é exclusiva do papel master.")
+        st.dataframe(
+            pd.DataFrame({"Médico": sorted(st.session_state["medicos_gestores"])}),
+            use_container_width=True, hide_index=True,
+        )
+
+    st.stop()
+
 # ============================================================= PÁGINA: VISÃO GERAL
 
-mes_ref = st.session_state["slider_mes"]
+mes_ref = st.session_state["mes_atual"]
 snap_completo = core.status_atual(niveis_df, anomes_referencia=mes_ref)
 # "ativo no mes" = fez pelo menos 1 plantao naquele mes. snap_completo tambem carrega medicos com
 # 0 plantoes no mes (preservados no historico so pra manter a carencia funcionando corretamente
@@ -333,11 +379,11 @@ tabela = snap[snap["nivel_vestido"].isin(filtro_nivel)].sort_values(
     ["nivel_vestido", "n_plantoes"], ascending=[False, False]
 )
 st.dataframe(
-    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "teve_coordenacao", "nivel_vestido",
+    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "nivel_vestido",
             "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral"]]
     .rename(columns={
         "medico": "Médico", "n_plantoes": "Total Plantões", "n_fds": "FDS (Sáb/Dom)",
-        "n_noturno": "Noturno", "teve_coordenacao": "Coordenador", "nivel_vestido": "Nível",
+        "n_noturno": "Noturno", "nivel_vestido": "Nível",
         "pct_aumento_exibido": "% Aumento", "valor_repasse": "Valor Plantões",
         "custo_aumento_pct_mes": "Valor Aumento", "valor_total_geral": "Total Geral",
     })

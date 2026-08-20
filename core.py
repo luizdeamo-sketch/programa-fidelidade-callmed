@@ -208,16 +208,32 @@ def agregar_mensal(df):
     return agg
 
 
-def calcular_niveis(agg, niveis=None):
+def listar_medicos(agg):
+    """Lista de medicos distintos na base agregada, ordenada - usada pelo seletor da tela de
+    Gestores (marcar manualmente quem entra direto no Nivel 4, sem depender do pagamento de
+    Coordenacao/Gestao ter sido lancado certo na base)."""
+    if agg.empty:
+        return []
+    return sorted(agg["medico"].unique())
+
+
+def calcular_niveis(agg, niveis=None, medicos_gestores=None):
     """Para cada medico, percorre cronologicamente os meses (desde o primeiro mes dele na base
     ate o mes mais recente) e calcula nivel_bruto, nivel_vestido (com carencia aplicada) e os
     custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (reseta
     carencia de nivel 2+, mas nao "sai" do historico).
 
     'niveis' permite recalcular com parametros customizados (editados na tela de Configuracoes)
-    em vez dos parametros padrao aprovados (NIVEIS) - mesmo formato de lista de dicts."""
+    em vez dos parametros padrao aprovados (NIVEIS) - mesmo formato de lista de dicts.
+
+    'medicos_gestores' e a lista curada manualmente na tela "Gestores" (nomes de medico) - quem
+    esta nela tem Nivel 4 automatico em TODO o historico, junto com (nao substitui, conforme
+    decisao do usuario em 2026-08-20) a deteccao automatica via pagamento de Coordenacao/Gestao
+    (teve_coordenacao). Existe pra cobrir gestor que nunca teve um pagamento desse tipo lancado
+    certo na base."""
     niveis = sorted(niveis or NIVEIS, key=lambda n: n["idx"])
     nivel_por_idx = niveis_para_dict(niveis)
+    medicos_gestores = set(medicos_gestores or [])
     if agg.empty:
         return pd.DataFrame()
     meses_todos = sorted(agg["anomes"].unique())
@@ -225,6 +241,7 @@ def calcular_niveis(agg, niveis=None):
 
     resultados = []
     for medico, grp in agg.groupby("medico"):
+        eh_gestor_manual = medico in medicos_gestores
         grp = grp.set_index("anomes")
         primeiro_idx = min(mes_para_indice[m] for m in grp.index)
         ultimo_idx = mes_para_indice[meses_todos[-1]]  # roda ate o fim da base pra todo mundo
@@ -242,9 +259,12 @@ def calcular_niveis(agg, niveis=None):
                 n_plantoes, n_fds, n_noturno, n_fds_ou_noturno = 0, 0, 0, 0
                 teve_coord, valor_repasse = False, 0.0
 
-            # exigencia de nivel (min_fds) conta sobre a UNIAO fds+noturno, nao so fds puro
+            # exigencia de nivel (min_fds) conta sobre a UNIAO fds+noturno, nao so fds puro.
+            # Nivel 4 automatico se teve pagamento de coordenacao/gestao naquele mes OU se esta
+            # na lista manual de gestores (as duas coexistem - OR, decisao do usuario 2026-08-20).
             nivel_bruto = (
-                niveis[-1]["idx"] if teve_coord else _nivel_bruto(n_plantoes, n_fds_ou_noturno, niveis)
+                niveis[-1]["idx"] if (teve_coord or eh_gestor_manual)
+                else _nivel_bruto(n_plantoes, n_fds_ou_noturno, niveis)
             )
 
             for nivel_check in (2, 3, 4):
@@ -286,10 +306,10 @@ def montar_agregado(arquivo=None):
     return agregar_mensal(df_linhas)
 
 
-def montar_base_completa(arquivo=None, niveis=None):
+def montar_base_completa(arquivo=None, niveis=None, medicos_gestores=None):
     """Pipeline completo: le, agrega, calcula niveis. Cacheable pela camada de UI."""
     agg = montar_agregado(arquivo)
-    return calcular_niveis(agg, niveis=niveis)
+    return calcular_niveis(agg, niveis=niveis, medicos_gestores=medicos_gestores)
 
 
 def status_atual(niveis_df, anomes_referencia=None):
