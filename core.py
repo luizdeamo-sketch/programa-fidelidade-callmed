@@ -110,7 +110,20 @@ def carregar_plantoes(arquivo=None):
     if df.empty:
         return df
     df["data_dt"] = pd.to_datetime(df["data_raw"], dayfirst=True, errors="coerce")
-    df["eh_fds"] = df["data_dt"].dt.dayofweek.isin([4, 5, 6]).fillna(False)
+    # FDS = Sabado e Domingo (sexta NAO conta mais - mudanca de regra confirmada pelo usuario,
+    # sessao 2026-08-20, ver Programa_Constelacao_CallMed_v2.md).
+    df["eh_fds"] = df["data_dt"].dt.dayofweek.isin([5, 6]).fillna(False)
+    # Noturno = comeca as 19h ou depois, OU esta marcado como Noturno/Cinderela no Tipo/Local
+    # (mesma sessao) - cobre casos com esse rotulo mas horario de inicio um pouco antes das 19h.
+    texto_tipo_local = (df["tipo"].fillna("") + " " + df["local"].fillna("")).str.lower()
+    df["eh_noturno"] = (
+        (df["data_dt"].dt.hour >= 19).fillna(False)
+        | texto_tipo_local.str.contains("noturno|cinderela", regex=True, na=False)
+    )
+    # Exigencia de nivel (min_fds) passa a valer sobre a UNIAO de FDS e Noturno, sem contar 2x um
+    # plantao que seja os dois (ex.: sexta a noite - sexta ja nao conta como FDS pela regra nova,
+    # mas se fosse sabado a noite contaria 1 vez so aqui).
+    df["eh_fds_ou_noturno"] = df["eh_fds"] | df["eh_noturno"]
     df["eh_gestao"] = df["tipo"].isin(GESTAO_TIPOS)
     df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
     df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
@@ -121,22 +134,27 @@ def carregar_plantoes(arquivo=None):
 
 
 def agregar_mensal(df):
-    """Agrega linha-a-linha em (medico, anomes) -> n_plantoes validos, n_fds validos, se teve
-    pagamento de coordenacao/gestao naquele mes (mesmo fora do escopo de hospital - coordenacao
-    e coordenacao em qualquer lugar), e valor de repasse elegivel (base pro % de aumento)."""
+    """Agrega linha-a-linha em (medico, anomes) -> n_plantoes validos, n_fds (Sab/Dom) validos,
+    n_noturno validos, n_fds_ou_noturno (uniao, base da exigencia de nivel), se teve pagamento de
+    coordenacao/gestao naquele mes (mesmo fora do escopo de hospital - coordenacao e coordenacao
+    em qualquer lugar), e valor de repasse elegivel (base pro % de aumento)."""
+    colunas_vazias = ["medico", "anomes", "n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno",
+                       "teve_coordenacao", "valor_repasse"]
     if df.empty:
-        return pd.DataFrame(columns=["medico", "anomes", "n_plantoes", "n_fds", "teve_coordenacao", "valor_repasse"])
+        return pd.DataFrame(columns=colunas_vazias)
     validos = df[df["conta_pro_nivel"]]
     agg = validos.groupby(["medico", "anomes"]).agg(
         n_plantoes=("valor", "count"),
         n_fds=("eh_fds", "sum"),
+        n_noturno=("eh_noturno", "sum"),
+        n_fds_ou_noturno=("eh_fds_ou_noturno", "sum"),
         valor_repasse=("valor", "sum"),
     ).reset_index()
     coord = df[df["eh_gestao"]].groupby(["medico", "anomes"]).size().reset_index(name="_n_coord")
     agg = agg.merge(coord, on=["medico", "anomes"], how="outer")
     # medicos que so tem linha de coordenacao (sem plantao clinico contavel no mes) tambem entram
-    agg["n_plantoes"] = agg["n_plantoes"].fillna(0).astype(int)
-    agg["n_fds"] = agg["n_fds"].fillna(0).astype(int)
+    for col in ("n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno"):
+        agg[col] = agg[col].fillna(0).astype(int)
     agg["valor_repasse"] = agg["valor_repasse"].fillna(0.0)
     agg["teve_coordenacao"] = agg["_n_coord"].fillna(0) > 0
     agg = agg.drop(columns=["_n_coord"])
@@ -168,13 +186,19 @@ def calcular_niveis(agg, niveis=None):
             am = meses_todos[i]
             if am in grp.index:
                 row = grp.loc[am]
-                n_plantoes, n_fds = int(row["n_plantoes"]), int(row["n_fds"])
+                n_plantoes = int(row["n_plantoes"])
+                n_fds, n_noturno = int(row["n_fds"]), int(row["n_noturno"])
+                n_fds_ou_noturno = int(row["n_fds_ou_noturno"])
                 teve_coord = bool(row["teve_coordenacao"])
                 valor_repasse = float(row["valor_repasse"])
             else:
-                n_plantoes, n_fds, teve_coord, valor_repasse = 0, 0, False, 0.0
+                n_plantoes, n_fds, n_noturno, n_fds_ou_noturno = 0, 0, 0, 0
+                teve_coord, valor_repasse = False, 0.0
 
-            nivel_bruto = niveis[-1]["idx"] if teve_coord else _nivel_bruto(n_plantoes, n_fds, niveis)
+            # exigencia de nivel (min_fds) conta sobre a UNIAO fds+noturno, nao so fds puro
+            nivel_bruto = (
+                niveis[-1]["idx"] if teve_coord else _nivel_bruto(n_plantoes, n_fds_ou_noturno, niveis)
+            )
 
             for nivel_check in (2, 3, 4):
                 if nivel_bruto >= nivel_check:
@@ -191,14 +215,18 @@ def calcular_niveis(agg, niveis=None):
             info_vestido = nivel_por_idx[nivel_vestido]
             custo_seguro = CUSTO_SEGURO_TOTAL_MES if info_vestido["tem_seguro"] else 0.0
             custo_aumento_pct = valor_repasse * info_vestido["pct_aumento"]
+            valor_total_geral = valor_repasse + custo_aumento_pct
 
             resultados.append({
                 "medico": medico, "anomes": am,
-                "n_plantoes": n_plantoes, "n_fds": n_fds, "teve_coordenacao": teve_coord,
+                "n_plantoes": n_plantoes, "n_fds": n_fds, "n_noturno": n_noturno,
+                "n_fds_ou_noturno": n_fds_ou_noturno, "teve_coordenacao": teve_coord,
                 "valor_repasse": valor_repasse,
                 "nivel_bruto": nivel_bruto, "nivel_vestido": nivel_vestido,
+                "pct_aumento_exibido": info_vestido["pct_exibido"],
                 "streak_n2": streaks[2], "streak_n3": streaks[3], "streak_n4": streaks[4],
                 "custo_seguro_mes": custo_seguro, "custo_aumento_pct_mes": custo_aumento_pct,
+                "valor_total_geral": valor_total_geral,
             })
     return pd.DataFrame(resultados)
 

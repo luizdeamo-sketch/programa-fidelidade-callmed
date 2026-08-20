@@ -144,7 +144,7 @@ with st.expander(
             "Nível": n["idx"],
             "Mín. plantões": n["min_plantoes"],
             "Máx. plantões (vazio = sem limite)": n["max_plantoes"],
-            "Mín. FDS": n["min_fds"],
+            "Mín. FDS+Noturno": n["min_fds"],
             "Carência (meses)": n["carencia_meses"],
             "% aumento no plantão": round(n["pct_aumento"] * 100, 2),
         })
@@ -172,7 +172,7 @@ with st.expander(
                     "nome": f"Nível {int(idx)}",
                     "min_plantoes": int(row["Mín. plantões"]),
                     "max_plantoes": None if pd.isna(maximo) else int(maximo),
-                    "min_fds": int(row["Mín. FDS"]),
+                    "min_fds": int(row["Mín. FDS+Noturno"]),
                     "carencia_meses": int(row["Carência (meses)"]),
                     "pct_aumento": float(row["% aumento no plantão"]) / 100,
                     "pct_exibido": round(float(row["% aumento no plantão"])),
@@ -267,17 +267,25 @@ cc3.metric("Total", fmt_brl(snap["custo_seguro_mes"].sum() + snap["custo_aumento
 
 st.markdown("---")
 st.markdown("#### Tabela de médicos")
+st.caption(
+    "FDS = Sáb/Dom. Noturno = a partir das 19h (ou marcado como Noturno/Cinderela). A exigência "
+    "de cada nível soma FDS + Noturno (sem contar duas vezes o mesmo plantão)."
+)
 filtro_nivel = st.multiselect("Filtrar por nível", [1, 2, 3, 4], key="filtro_nivel_ms")
 tabela = snap[snap["nivel_vestido"].isin(filtro_nivel)].sort_values(
     ["nivel_vestido", "n_plantoes"], ascending=[False, False]
 )
 st.dataframe(
-    tabela[["medico", "n_plantoes", "n_fds", "teve_coordenacao", "nivel_bruto", "nivel_vestido",
-            "custo_seguro_mes", "custo_aumento_pct_mes"]]
-    .rename(columns={"medico": "Médico", "n_plantoes": "Plantões", "n_fds": "FDS",
-                      "teve_coordenacao": "Coordenador", "nivel_bruto": "Nível (volume)",
-                      "nivel_vestido": "Nível (vigente)", "custo_seguro_mes": "Custo seguro",
-                      "custo_aumento_pct_mes": "Custo % aumento"}),
+    tabela[["medico", "n_plantoes", "n_fds", "n_noturno", "teve_coordenacao", "nivel_vestido",
+            "pct_aumento_exibido", "valor_repasse", "custo_aumento_pct_mes", "valor_total_geral"]]
+    .rename(columns={
+        "medico": "Médico", "n_plantoes": "Total Plantões", "n_fds": "FDS (Sáb/Dom)",
+        "n_noturno": "Noturno", "teve_coordenacao": "Coordenador", "nivel_vestido": "Nível",
+        "pct_aumento_exibido": "% Aumento", "valor_repasse": "Valor Plantões",
+        "custo_aumento_pct_mes": "Valor Aumento", "valor_total_geral": "Total Geral",
+    })
+    .style.format({"% Aumento": "{:.0f}%", "Valor Plantões": fmt_brl, "Valor Aumento": fmt_brl,
+                    "Total Geral": fmt_brl}),
     use_container_width=True, hide_index=True,
 )
 
@@ -291,11 +299,12 @@ if nome:
     atual = hist.iloc[-1]
     info_nivel = core.NIVEL_POR_IDX[int(atual["nivel_vestido"])]
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.markdown(f"**Nível vigente**<br>{badge_nivel(int(atual['nivel_vestido']))}", unsafe_allow_html=True)
-    m2.metric("Plantões válidos no mês", int(atual["n_plantoes"]))
-    m3.metric("Plantões em Sex/Sáb/Dom", int(atual["n_fds"]))
-    m4.metric("Aumento no valor do plantão", f"{info_nivel['pct_exibido']}%")
+    m2.metric("Total de plantões", int(atual["n_plantoes"]))
+    m3.metric("FDS (Sáb/Dom)", int(atual["n_fds"]))
+    m4.metric("Noturno", int(atual["n_noturno"]))
+    m5.metric("Aumento no valor do plantão", f"{info_nivel['pct_exibido']}%")
 
     if int(atual["nivel_bruto"]) != int(atual["nivel_vestido"]):
         st.info(
@@ -306,9 +315,10 @@ if nome:
 
     with st.expander("Ver histórico completo"):
         st.dataframe(
-            hist[["anomes", "n_plantoes", "n_fds", "nivel_bruto", "nivel_vestido"]]
-            .rename(columns={"anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "Fim de semana",
-                              "nivel_bruto": "Nível (volume)", "nivel_vestido": "Nível (vigente)"}),
+            hist[["anomes", "n_plantoes", "n_fds", "n_noturno", "nivel_bruto", "nivel_vestido"]]
+            .rename(columns={"anomes": "Mês", "n_plantoes": "Plantões", "n_fds": "FDS (Sáb/Dom)",
+                              "n_noturno": "Noturno", "nivel_bruto": "Nível (volume)",
+                              "nivel_vestido": "Nível (vigente)"}),
             use_container_width=True, hide_index=True,
         )
 
