@@ -41,6 +41,11 @@ EXCLUSAO_HOSPITAL_REGEX = re.compile(r"covas|amhemed", re.IGNORECASE)
 # exclui UTI e Enfermaria automaticamente, sem precisar de regra separada pra elas.
 ESPECIALIDADE_VALIDA = "Anestesia"
 
+# Separador da chave composta operacao+especialidade usada na tela "Operacoes" (ex.: "Hospital
+# Sao Bernardo :: Anestesia") - precisa ser algo que nao apareca em nome de hospital nem de
+# especialidade real da base.
+SEP_OP_ESP = " :: "
+
 NIVEIS = [
     # min_fds = minimo de FDS(Sab/Dom) + Noturno somados (uniao) - valores confirmados pelo
     # usuario em 2026-08-20 (exemplo real: medico com 19 plantoes precisa de min. 4).
@@ -130,10 +135,17 @@ def carregar_plantoes(arquivo=None):
     df["operacao"] = df["local"].apply(operacao_de)
     df["hospital_excluido"] = df["local"].str.contains(EXCLUSAO_HOSPITAL_REGEX, na=False)
     df["eh_anestesia"] = df["especialidade"] == ESPECIALIDADE_VALIDA
+    # "chave_operacao" = operacao (hospital/grupo) + especialidade, ex.: "Hospital Sao Bernardo ::
+    # Anestesia" - granularidade real da tela "Operacoes" (decisao do usuario em 2026-08-20: um
+    # hospital com Anestesia/Enfermaria/UTI vira 3 linhas flegaveis separadamente, nao 1 so).
+    especialidade_disp = df["especialidade"].replace("", "(sem especialidade)")
+    df["chave_operacao"] = df["operacao"] + SEP_OP_ESP + especialidade_disp
     # plantao valido = conta pro volume do nivel: especialidade Anestesia, hospital nao excluido,
     # e nao e pagamento de gestao/coordenacao (isso conta separado, pra flag de coordenador). Este
-    # e o padrao default (regex fixo) - a tela "Operacoes" permite substituir hospital_excluido por
-    # uma lista customizada via aplicar_operacoes_customizadas(), sem precisar reler o Excel.
+    # e o padrao default (regex fixo, so Anestesia) - a tela "Operacoes" permite substituir esse
+    # filtro por uma lista customizada de chave_operacao via aplicar_operacoes_customizadas(),
+    # sem precisar reler o Excel - inclusive liberando especialidades fora de Anestesia se o
+    # master decidir flegar.
     df["conta_pro_nivel"] = df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
     return df
 
@@ -146,37 +158,44 @@ def operacao_de(local):
 
 
 def listar_operacoes(df):
-    """Lista as operacoes distintas encontradas na base, com contexto (especialidades vistas,
-    total de linhas, quantas contam hoje pela regra padrao) - usada pela tela de Configuracoes >
-    Operacoes, pra o master validar/ajustar manualmente o que entra no Programa Fidelidade."""
+    """Lista as combinacoes distintas de (operacao, especialidade) encontradas na base - cada uma
+    e uma linha flegavel separada na tela de Configuracoes > Operacoes (ex.: 'Hospital Sao
+    Bernardo' com Anestesia/Enfermaria/UTI vira 3 linhas, nao 1 com 'especialidades vistas' numa
+    lista - decisao do usuario em 2026-08-20, pra poder incluir/excluir cada combinacao por si)."""
+    colunas_vazias = ["chave_operacao", "operacao", "especialidade", "total_linhas", "conta_hoje",
+                       "incluida_padrao"]
     if df.empty:
-        return pd.DataFrame(columns=["operacao", "total_linhas", "especialidades", "conta_hoje", "incluida_padrao"])
-    resumo = df.groupby("operacao").agg(
+        return pd.DataFrame(columns=colunas_vazias)
+    resumo = df.groupby(["chave_operacao", "operacao", "especialidade"]).agg(
         total_linhas=("valor", "count"),
-        especialidades=("especialidade", lambda s: ", ".join(sorted(set(s) - {""}))),
         conta_hoje=("conta_pro_nivel", "sum"),
     ).reset_index()
+    resumo["especialidade"] = resumo["especialidade"].replace("", "(sem especialidade)")
     resumo["incluida_padrao"] = resumo["conta_hoje"] > 0
-    return resumo.sort_values("total_linhas", ascending=False)
+    return resumo.sort_values(["operacao", "especialidade"])
 
 
 def operacoes_excluidas_por_padrao(df):
-    """Calcula o conjunto de operacoes que o filtro padrao (EXCLUSAO_HOSPITAL_REGEX) excluiria -
-    usado so pra inicializar a tela de Configuracoes > Operacoes com o estado atual, antes do
-    master customizar qualquer coisa."""
+    """Calcula o conjunto de chaves (operacao+especialidade) que o filtro padrao excluiria hoje:
+    so Anestesia conta, e dentro disso ainda exclui os hospitais do EXCLUSAO_HOSPITAL_REGEX -
+    usado so pra inicializar a tela de Configuracoes > Operacoes com um estado EQUIVALENTE ao
+    comportamento anterior ao refinamento por especialidade, antes do master customizar."""
     if df.empty:
         return set()
-    return set(df.loc[df["hospital_excluido"], "operacao"].unique())
+    elegivel_padrao = df["eh_anestesia"] & (~df["hospital_excluido"])
+    return set(df.loc[~elegivel_padrao, "chave_operacao"].unique())
 
 
 def aplicar_operacoes_customizadas(df, operacoes_excluidas):
-    """Recalcula conta_pro_nivel usando uma lista customizada de operacoes excluidas (definida na
-    tela de Configuracoes > Operacoes) em vez do EXCLUSAO_HOSPITAL_REGEX fixo. Nao mexe no Excel,
-    so reprocessa o dataframe ja carregado - barato, pode rodar a cada mudanca na tela."""
+    """Recalcula conta_pro_nivel usando um conjunto customizado de chaves (operacao+especialidade)
+    excluidas (tela de Configuracoes > Operacoes) em vez do filtro fixo (so Anestesia, fora
+    EXCLUSAO_HOSPITAL_REGEX). Granularidade agora e por combinacao especifica, entao o master pode
+    liberar uma especialidade fora de Anestesia se quiser (ela so nao aparece pre-marcada por
+    padrao). Nao mexe no Excel, so reprocessa o dataframe ja carregado."""
     df = df.copy()
     operacoes_excluidas = set(operacoes_excluidas or [])
-    df["operacao_excluida"] = df["operacao"].isin(operacoes_excluidas)
-    df["conta_pro_nivel"] = df["eh_anestesia"] & (~df["operacao_excluida"]) & (~df["eh_gestao"])
+    df["chave_excluida"] = df["chave_operacao"].isin(operacoes_excluidas)
+    df["conta_pro_nivel"] = (~df["chave_excluida"]) & (~df["eh_gestao"])
     return df
 
 

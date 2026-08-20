@@ -209,41 +209,48 @@ st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df
 if pagina == "🏥 Operações":
     st.subheader("🏥 Operações que contam pro Programa Fidelidade")
     st.caption(
-        "Cada linha é um hospital/operação (mesmo agrupamento usado no bônus de ramp-up). "
-        "Desmarcar uma operação tira TODOS os plantões dela da contagem de nível dos médicos — "
-        "afeta o histórico inteiro, não só o mês atual."
+        "Cada linha é uma combinação **hospital + especialidade** — ex.: 'Hospital São Bernardo' "
+        "vira 3 linhas (Anestesia, Enfermaria, UTI), cada uma flegável separadamente. Desmarcar "
+        "uma linha tira só aqueles plantões da contagem de nível dos médicos — afeta o histórico "
+        "inteiro, não só o mês atual."
     )
     if st.session_state.pop("sucesso_operacoes", False):
         st.success("Lista de operações aplicada — histórico recalculado.")
 
     resumo_op = core.listar_operacoes(df_linhas)
-    resumo_op["Incluída"] = ~resumo_op["operacao"].isin(st.session_state["operacoes_excluidas"])
-    tabela_op = resumo_op[["operacao", "especialidades", "total_linhas", "conta_hoje", "Incluída"]].rename(
-        columns={"operacao": "Operação", "especialidades": "Especialidades vistas",
-                 "total_linhas": "Total de linhas", "conta_hoje": "Contam hoje"}
-    )
+    tabela_op = resumo_op[["chave_operacao", "operacao", "especialidade", "total_linhas", "conta_hoje"]].copy()
+    tabela_op["Incluída"] = ~resumo_op["chave_operacao"].isin(st.session_state["operacoes_excluidas"]).values
+    tabela_op = tabela_op.rename(columns={
+        "operacao": "Operação", "especialidade": "Especialidade",
+        "total_linhas": "Total de linhas", "conta_hoje": "Contam hoje",
+    })
 
     if eh_master:
         tabela_editada = st.data_editor(
             tabela_op, use_container_width=True, hide_index=True, key="editor_operacoes",
-            disabled=["Operação", "Especialidades vistas", "Total de linhas", "Contam hoje"],
+            column_order=["Operação", "Especialidade", "Total de linhas", "Contam hoje", "Incluída"],
+            disabled=["chave_operacao", "Operação", "Especialidade", "Total de linhas", "Contam hoje"],
             column_config={"Incluída": st.column_config.CheckboxColumn(
-                help="Desmarque para excluir essa operação inteira do Programa Fidelidade."
+                help="Desmarque para excluir essa combinação hospital+especialidade do Programa Fidelidade."
             )},
         )
         if st.button("✅ Aplicar mudanças e recalcular", type="primary"):
+            # "chave_operacao" fica no dataframe (so nao aparece na tela, via column_order) pra
+            # ler de volta aqui de forma robusta, sem depender da ordem das linhas.
             novas_excluidas = set(
-                tabela_editada.loc[~tabela_editada["Incluída"], "Operação"]
+                tabela_editada.loc[~tabela_editada["Incluída"], "chave_operacao"]
             )
             st.session_state["operacoes_excluidas"] = novas_excluidas
             st.session_state["sucesso_operacoes"] = True
             st.rerun()
-        if st.button("↩️ Restaurar padrão (Mário Covas e Amhemed fora)"):
+        if st.button("↩️ Restaurar padrão (só Anestesia, fora Mário Covas/Amhemed)"):
             st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
             st.rerun()
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")
-        st.dataframe(tabela_op, use_container_width=True, hide_index=True)
+        st.dataframe(
+            tabela_op.drop(columns=["chave_operacao"]), use_container_width=True, hide_index=True,
+        )
 
     st.stop()
 
