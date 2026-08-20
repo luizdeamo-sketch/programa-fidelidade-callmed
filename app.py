@@ -12,6 +12,7 @@ Lovable já discutida.
 """
 import copy
 import datetime as dt
+import io
 import json
 import os
 
@@ -26,10 +27,24 @@ st.set_page_config(page_title="Programa Fidelidade CallMed", page_icon="⭐", la
 
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Excel)...")
-def carregar_linhas_brutas():
-    """Parte lenta (leitura do Excel) - nao depende de operacoes nem de niveis, so precisa rodar
-    de novo se o Excel mudar."""
-    return core.carregar_plantoes()
+def carregar_linhas_brutas(apoio_json):
+    """Parte lenta (leitura do Excel) - cacheada tambem pelo JSON do mapeamento Apoio (tela '🗂️
+    Apoio'), entao so recalcula de fato quando o Excel muda OU o master edita alguma
+    classificacao la."""
+    if apoio_json and apoio_json != "[]":
+        apoio_df = pd.read_json(io.StringIO(apoio_json))
+    else:
+        apoio_df = pd.DataFrame(columns=["local", "coordenador", "setor_definido", "especialidade_apoio"])
+    return core.carregar_plantoes(apoio_df=apoio_df)
+
+
+def apoio_para_json(apoio_df):
+    """Serializa o mapeamento Apoio (DataFrame) pra uma chave de cache estavel - ordenado por
+    Local pra nao invalidar o cache so por causa de ordem de linha diferente."""
+    if apoio_df is None or apoio_df.empty:
+        return "[]"
+    colunas = ["local", "coordenador", "setor_definido", "especialidade_apoio"]
+    return apoio_df[colunas].sort_values("local").to_json(orient="records", force_ascii=False)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -86,8 +101,12 @@ eh_master = usuario["papel"] in usuarios.PAPEIS_COM_ACAO_SENSIVEL
 
 if "niveis_custom" not in st.session_state:
     st.session_state["niveis_custom"] = copy.deepcopy(core.NIVEIS)
+if "apoio_custom" not in st.session_state:
+    # resolver_apoio() decide: se ja existe versao gerenciada pelo sistema (persistida pela tela
+    # '🗂️ Apoio'), usa ela - senao importa da aba Apoio do Excel uma unica vez (bootstrap).
+    st.session_state["apoio_custom"] = core.resolver_apoio()
 
-df_linhas = carregar_linhas_brutas()
+df_linhas = carregar_linhas_brutas(apoio_para_json(st.session_state["apoio_custom"]))
 if "operacoes_excluidas" not in st.session_state:
     st.session_state["operacoes_excluidas"] = core.operacoes_excluidas_por_padrao(df_linhas)
 if "medicos_gestores" not in st.session_state:
@@ -161,7 +180,7 @@ with st.sidebar:
     pagina = st.radio(
         "Navegação",
         ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
-         "📄 Relatório do Médico"],
+         "📄 Relatório do Médico", "🗂️ Apoio (Local → Especialidade)"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -206,6 +225,65 @@ with st.sidebar:
 
 st.title("⭐ Programa Fidelidade CallMed — Constelação")
 st.caption(f"Regras vigentes a partir de {core.GO_LIVE} · dados até {niveis_df['anomes'].max()}")
+
+# ============================================================= PÁGINA: APOIO
+if pagina == "🗂️ Apoio (Local → Especialidade)":
+    st.subheader("🗂️ Apoio — mapeamento Local → Especialidade")
+    st.caption(
+        "Fonte de verdade de qual operação/especialidade cada plantão pertence — o sistema não "
+        "depende mais de consultar a aba 'Apoio' do Excel a cada carregamento, esse mapeamento "
+        "vive aqui e o master edita direto. Local sem classificação aparece no topo da tabela "
+        "(volume maior primeiro), pra priorizar o que falta revisar."
+    )
+    if st.session_state.pop("sucesso_apoio", False):
+        st.success("Mapeamento aplicado e salvo — histórico recalculado.")
+
+    resumo_apoio = core.resumo_locais_para_apoio(df_linhas, st.session_state["apoio_custom"])
+    n_nao_classificados = int((~resumo_apoio["classificado"]).sum())
+    if n_nao_classificados:
+        st.warning(
+            f"⚠️ {n_nao_classificados} Local(is) sem classificação ainda — aparecem no topo da "
+            "tabela abaixo. Enquanto não forem preenchidos, entram no cálculo de nível como se "
+            "não fossem Anestesia (ficam de fora por padrão, comportamento conservador)."
+        )
+
+    tabela_apoio = resumo_apoio[["local", "total_linhas", "medicos", "coordenador",
+                                  "setor_definido", "especialidade_apoio"]].rename(columns={
+        "local": "Local (original)", "total_linhas": "Linhas na base", "medicos": "Médicos",
+        "coordenador": "Coordenador", "setor_definido": "Setor Definido (operação)",
+        "especialidade_apoio": "Especialidade",
+    })
+
+    if eh_master:
+        tabela_editada = st.data_editor(
+            tabela_apoio, use_container_width=True, hide_index=True, key="editor_apoio",
+            disabled=["Local (original)", "Linhas na base", "Médicos"], height=500,
+        )
+        cbtn1, cbtn2 = st.columns(2)
+        if cbtn1.button("✅ Aplicar mudanças e recalcular", type="primary"):
+            novo_apoio = tabela_editada.rename(columns={
+                "Local (original)": "local", "Coordenador": "coordenador",
+                "Setor Definido (operação)": "setor_definido", "Especialidade": "especialidade_apoio",
+            })[["local", "coordenador", "setor_definido", "especialidade_apoio"]]
+            core.salvar_apoio_customizado(novo_apoio)
+            st.session_state["apoio_custom"] = novo_apoio
+            st.session_state["sucesso_apoio"] = True
+            st.rerun()
+        if cbtn2.button("↩️ Restaurar da planilha (aba Apoio do Excel)"):
+            apoio_planilha = core.carregar_apoio()
+            core.salvar_apoio_customizado(apoio_planilha)
+            st.session_state["apoio_custom"] = apoio_planilha
+            st.session_state["sucesso_apoio"] = True
+            st.rerun()
+        st.caption(
+            "O recálculo roda o histórico inteiro de novo — afeta nível, carência e o valor de "
+            "aumento pago a todos os médicos que passam por esses Locais."
+        )
+    else:
+        st.caption("Somente leitura — edição é exclusiva do papel master.")
+        st.dataframe(tabela_apoio, use_container_width=True, hide_index=True, height=500)
+
+    st.stop()
 
 # ============================================================= PÁGINA: OPERAÇÕES
 if pagina == "🏥 Operações":

@@ -31,6 +31,13 @@ BASE_PLANTOES = os.path.join(
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dados_upload")
 UPLOAD_PLANTOES = os.path.join(UPLOAD_DIR, "plantoes.xlsx")
 
+# Mapeamento Local -> Setor Definido/Especialidade GERENCIADO PELO SISTEMA (tela "🗂️ Apoio",
+# sessao 2026-08-20) - substitui a dependencia de consultar a aba "Apoio" do Excel toda vez.
+# Nasce importado de la (bootstrap, uma vez), dai em diante o master edita e o sistema persiste
+# aqui, direto. MESMA ressalva do UPLOAD_PLANTOES acima: sobrevive a reruns/reinicios locais, mas
+# some se o app redeployar no Streamlit Community Cloud (filesystem efemero por la).
+APOIO_CUSTOMIZADO = os.path.join(UPLOAD_DIR, "apoio_customizado.json")
+
 
 def resolver_base_plantoes():
     """Prioridade: upload feito pela tela de Configuracoes > caminho local do OneDrive.

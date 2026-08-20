@@ -17,6 +17,8 @@ documento de referencia completo, aprovado pelo usuario):
   recente, entao em Setembro/2026 (GO_LIVE) cada medico ja "nasce" no nivel/carencia real que
   o historico dele sustenta - ninguem comeca do zero por definicao de codigo.
 """
+import json
+import os
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -141,7 +143,70 @@ def carregar_apoio(arquivo=None):
     return apoio.drop_duplicates("local", keep="first")
 
 
-def carregar_plantoes(arquivo=None):
+_COLUNAS_APOIO = ["local", "coordenador", "setor_definido", "especialidade_apoio"]
+
+
+def salvar_apoio_customizado(apoio_df, caminho=None):
+    """Persiste o mapeamento Local -> Setor Definido/Especialidade GERENCIADO PELO SISTEMA (tela
+    '🗂️ Apoio', 2026-08-20) em disco como JSON - sobrevive a reruns/reinicios locais do servidor
+    (ver config_caminhos.APOIO_CUSTOMIZADO e a ressalva sobre Streamlit Cloud la)."""
+    caminho = caminho or cfg.APOIO_CUSTOMIZADO
+    os.makedirs(os.path.dirname(caminho), exist_ok=True)
+    registros = apoio_df[_COLUNAS_APOIO].to_dict("records")
+    with open(caminho, "w", encoding="utf-8") as f:
+        json.dump(registros, f, ensure_ascii=False, indent=2)
+
+
+def carregar_apoio_customizado(caminho=None):
+    """Le o mapeamento Local -> Setor/Especialidade persistido pela tela '🗂️ Apoio' (JSON), se
+    ja existir. DataFrame vazio se ainda nao foi criado (antes do primeiro bootstrap)."""
+    caminho = caminho or cfg.APOIO_CUSTOMIZADO
+    if not os.path.exists(caminho):
+        return pd.DataFrame(columns=_COLUNAS_APOIO)
+    with open(caminho, "r", encoding="utf-8") as f:
+        registros = json.load(f)
+    apoio = pd.DataFrame(registros, columns=_COLUNAS_APOIO)
+    if apoio.empty:
+        return pd.DataFrame(columns=_COLUNAS_APOIO)
+    return apoio.drop_duplicates("local", keep="first")
+
+
+def resolver_apoio(arquivo=None):
+    """De onde vem o mapeamento Local -> Setor/Especialidade usado no calculo: se ja existe uma
+    versao GERENCIADA PELO SISTEMA (persistida pela tela '🗂️ Apoio'), usa ela - senao importa da
+    aba 'Apoio' do Excel uma unica vez (bootstrap) e ja salva, pro sistema assumir dai em diante
+    sem depender mais da planilha. Pedido do usuario em 2026-08-20: 'ao inves de consultar a
+    planilha, essa regra e gerida pelo sistema'."""
+    apoio_sistema = carregar_apoio_customizado()
+    if not apoio_sistema.empty:
+        return apoio_sistema
+    apoio_planilha = carregar_apoio(arquivo)
+    if not apoio_planilha.empty:
+        salvar_apoio_customizado(apoio_planilha)
+    return apoio_planilha
+
+
+def resumo_locais_para_apoio(df_linhas, apoio_df):
+    """Junta os Local distintos da base (com volume de linhas e nº de médicos) com o mapeamento
+    atual (sistema ou planilha) - usado pra montar a tela '🗂️ Apoio', pro master ver o impacto de
+    cada Local antes de editar e priorizar o que falta classificar (sobe pro topo, ordenado por
+    volume dentro de cada grupo)."""
+    colunas_vazias = ["local", "total_linhas", "medicos", "coordenador", "setor_definido",
+                       "especialidade_apoio", "classificado"]
+    if df_linhas.empty:
+        return pd.DataFrame(columns=colunas_vazias)
+    resumo = df_linhas.groupby("local").agg(
+        total_linhas=("valor", "count"), medicos=("medico", "nunique"),
+    ).reset_index()
+    apoio_df = apoio_df if apoio_df is not None and not apoio_df.empty else pd.DataFrame(columns=_COLUNAS_APOIO)
+    tabela = resumo.merge(apoio_df, on="local", how="left")
+    for col in ("coordenador", "setor_definido", "especialidade_apoio"):
+        tabela[col] = tabela[col].fillna("")
+    tabela["classificado"] = tabela["setor_definido"] != ""
+    return tabela.sort_values(["classificado", "total_linhas"], ascending=[True, False])
+
+
+def carregar_plantoes(arquivo=None, apoio_df=None):
     """Le a base BD de plantoes (aba 'BD', formato "1.ANALISES LUIZ": colunas deslocadas +1 em
     relacao ao arquivo antigo do Desktop, com a coluna extra 'Especialidade' no fim) e retorna
     DataFrame linha-a-linha com os flags de elegibilidade ja calculados (nao agregado ainda)."""
@@ -194,11 +259,13 @@ def carregar_plantoes(arquivo=None):
     df["eh_tipo_nao_clinico"] = df["tipo"].isin(TIPOS_NAO_CONTAM_VOLUME)
     df["operacao_bd"] = df["local"].apply(operacao_de)
 
-    # Junta com a aba Apoio - fonte de verdade pro Setor Definido (operacao) e Especialidade, ver
-    # carregar_apoio(). "operacao"/"especialidade" daqui em diante SAO as versoes corrigidas
-    # (Apoio) - "operacao_bd"/"especialidade_bd" ficam guardadas so pra auditoria/transparencia
-    # (tela "Por que esses plantoes contam"), nunca usadas no calculo de nivel.
-    apoio = carregar_apoio(arquivo)
+    # Junta com o mapeamento Local -> Setor Definido/Especialidade - fonte de verdade pro
+    # "operacao"/"especialidade" corrigidos ("operacao_bd"/"especialidade_bd" ficam guardadas so
+    # pra auditoria/transparencia, nunca usadas no calculo de nivel). 'apoio_df' permite passar
+    # a versao GERENCIADA PELO SISTEMA (tela '🗂️ Apoio', editavel pelo master) em vez de sempre
+    # reler a aba Apoio do Excel - se nao vier nada, resolver_apoio() decide (sistema, se ja
+    # existir, senao a planilha como bootstrap).
+    apoio = apoio_df if apoio_df is not None else resolver_apoio(arquivo)
     if not apoio.empty:
         df = df.merge(apoio, on="local", how="left")
     else:
