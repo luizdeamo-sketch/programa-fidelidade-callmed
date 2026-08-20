@@ -442,6 +442,35 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # ---------------------------------------------------------- CALCULADORA DE PLANTÃO
+    # Simulação simples (pedido do usuário, 2026-08-20): quanto um plantão de valor X pagaria em
+    # cada nível do programa. Usa niveis_custom (respeita edição feita em "Regras do Programa"),
+    # não os percentuais fixos de core.NIVEIS.
+    with st.expander("🧮 Calculadora de plantão", expanded=False):
+        st.caption(
+            "Informe o valor basal de um plantão e veja quanto ele pagaria em cada nível do "
+            "programa (mesmos percentuais configurados em 'Regras do Programa')."
+        )
+        valor_basal_calc = st.number_input(
+            "Valor basal do plantão (R$)", min_value=0.0, value=1000.0, step=50.0,
+            format="%.2f", key="calc_valor_basal",
+        )
+        for nivel_calc in sorted(st.session_state["niveis_custom"], key=lambda n: n["idx"]):
+            ganho_calc = valor_basal_calc * nivel_calc["pct_aumento"]
+            valor_final_calc = valor_basal_calc + ganho_calc
+            complemento = (
+                f" &nbsp; <span style='color:#6B7280;font-size:0.85em'>(+{fmt_brl(ganho_calc)}, "
+                f"{nivel_calc['pct_exibido']}%)</span>"
+                if nivel_calc["pct_aumento"] else
+                " &nbsp; <span style='color:#6B7280;font-size:0.85em'>(valor cheio, sem aumento)</span>"
+            )
+            st.markdown(
+                f"{badge_nivel(nivel_calc['idx'])} &nbsp; **{fmt_brl(valor_final_calc)}**{complemento}",
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("---")
+
     # ---------------------------------------------------------- FONTE DE DADOS (upload + mesclagem)
     with st.expander("📁 Fonte de dados (base de plantões)", expanded=False):
         st.caption(
