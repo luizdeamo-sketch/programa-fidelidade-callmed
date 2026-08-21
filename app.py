@@ -630,7 +630,7 @@ with st.sidebar:
     st.markdown("---")
     pagina = st.radio(
         "Navegação",
-        ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
+        ["📊 Visão Geral", "📈 Analítico", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
          "📄 Relatório do Médico", "📣 Abordagem (quase lá)", "🗂️ Apoio (Local → Especialidade)",
          "🗄️ Base de Plantões"],
         label_visibility="collapsed",
@@ -1281,6 +1281,143 @@ if pagina == "📣 Abordagem (quase lá)":
             .style.format({"Ganho extra estimado": fmt_brl, "% no próximo nível": "{:.0f}%"}),
             use_container_width=True, hide_index=True,
         )
+
+    st.stop()
+
+# ============================================================= PÁGINA: ANALÍTICO
+# Pedido do usuário (2026-08-21): visão histórica objetiva do custo do programa mês a mês (ex.:
+# "jan-26 custo de 85k, fev 89k...") com gráfico, mais indicadores macro que ajudem a enxergar a
+# saúde do programa como um todo (não médico a médico) - no máximo 5, pra não virar painel poluído.
+if pagina == "📈 Analítico":
+    st.subheader("📈 Analítico")
+    st.caption(
+        "Visão histórica do programa — custo mês a mês e indicadores macro. Custo de seguro NÃO "
+        "entra em nenhum número aqui (mesma decisão já tomada na Visão Geral) — só o aumento % no "
+        "repasse e o bônus de ramp-up, que são os custos financeiros reais do programa."
+    )
+
+    # ---- Agregado mensal (toda a base, não só o mês selecionado no sidebar) ----
+    # Mesmo critério de "ativo no mês" da Visão Geral (n_plantoes >= 1) - niveis_df carrega todo
+    # médico em todo mês desde o primeiro dele até o mais recente da base (até com 0 plantões, só
+    # pra manter a carência funcionando entre meses - ver core.calcular_niveis), então sem esse
+    # filtro um médico "de férias" apareceria como médico ativo a mais, sem custo nenhum atrelado.
+    resumo_mensal = []
+    for am in meses_disponiveis:
+        snap_am = niveis_df[niveis_df["anomes"] == am]
+        snap_am = snap_am[snap_am["n_plantoes"] >= 1]
+        if snap_am.empty:
+            continue
+        custo_aumento_am = float(snap_am["custo_aumento_pct_mes"].sum())
+        custo_rampup_am = float(snap_am["custo_rampup_mes"].sum())
+        resumo_mensal.append({
+            "anomes": am,
+            "custo_aumento": custo_aumento_am,
+            "custo_rampup": custo_rampup_am,
+            "custo_total": custo_aumento_am + custo_rampup_am,
+            "valor_repasse": float(snap_am["valor_repasse"].sum()),
+            "n_plantoes": int(snap_am["n_plantoes"].sum()),
+            "n_ativos": len(snap_am),
+            "n_bonificados": int((snap_am["nivel_bruto"] >= 2).sum()),
+        })
+    df_mensal = pd.DataFrame(resumo_mensal)
+
+    if df_mensal.empty:
+        st.info("Sem dados suficientes pra montar a visão analítica ainda.")
+        st.stop()
+
+    st.markdown("#### Custo mensal do programa")
+    st.caption("Aumento % no repasse (pagamento por nível, imediato/sem carência) + bônus de ramp-up, mês a mês.")
+    st.bar_chart(
+        df_mensal.set_index("anomes")[["custo_aumento", "custo_rampup"]].rename(columns={
+            "custo_aumento": "Aumento % (nível)", "custo_rampup": "Bônus ramp-up",
+        }),
+        use_container_width=True,
+    )
+    st.dataframe(
+        df_mensal[["anomes", "custo_aumento", "custo_rampup", "custo_total"]].rename(columns={
+            "anomes": "Mês", "custo_aumento": "Aumento % (nível)", "custo_rampup": "Bônus ramp-up",
+            "custo_total": "Custo total",
+        }).style.format({
+            "Aumento % (nível)": fmt_brl, "Bônus ramp-up": fmt_brl, "Custo total": fmt_brl,
+        }),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown("---")
+    st.markdown("#### Indicadores macro")
+
+    # Indicadores calculados sobre o "📅 Mês de referência" do sidebar, com delta vs o mês
+    # imediatamente anterior NA TABELA (não necessariamente calendário-anterior, se houver buraco
+    # sem nenhum médico ativo). Se o mês selecionado for futuro/sem médico ativo ainda (agenda
+    # sendo montada), cai pro último mês com dado de verdade, pra não quebrar o cálculo.
+    mes_analitico = st.session_state["mes_atual"]
+    if mes_analitico in df_mensal["anomes"].values:
+        idx_linha_atual = df_mensal.index[df_mensal["anomes"] == mes_analitico][0]
+    else:
+        idx_linha_atual = df_mensal.index[-1]
+    linha_atual = df_mensal.loc[idx_linha_atual]
+    linha_anterior = df_mensal.loc[idx_linha_atual - 1] if idx_linha_atual > 0 else None
+
+    def _delta_pct(atual, anterior):
+        if anterior is None or anterior == 0:
+            return None
+        return f"{((atual - anterior) / anterior) * 100:+.1f}% vs {linha_anterior['anomes']}"
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+
+    # 1. Custo total do mês, com delta vs mês anterior - leitura rápida do que o gráfico acima
+    # mostra em detalhe.
+    k1.metric(
+        f"Custo total — {linha_atual['anomes']}", fmt_brl(linha_atual["custo_total"]),
+        delta=_delta_pct(linha_atual["custo_total"], linha_anterior["custo_total"] if linha_anterior is not None else None),
+        delta_color="off",
+    )
+
+    # 2. Custo do programa como % do repasse total do mês - "quanto o programa custa de verdade"
+    # em cima do que já seria pago de qualquer forma, não um número absoluto solto.
+    pct_custo_sobre_repasse = (
+        (linha_atual["custo_total"] / linha_atual["valor_repasse"] * 100)
+        if linha_atual["valor_repasse"] > 0 else 0.0
+    )
+    k2.metric("Custo do programa / repasse total", f"{pct_custo_sobre_repasse:.1f}%")
+
+    # 3. % de médicos bonificados (Nível 2+, por volume/pagamento) sobre os ativos no mês -
+    # alcance real do programa.
+    pct_bonificados = (
+        (linha_atual["n_bonificados"] / linha_atual["n_ativos"] * 100)
+        if linha_atual["n_ativos"] > 0 else 0.0
+    )
+    k3.metric(
+        "Médicos bonificados (N2+)",
+        f"{int(linha_atual['n_bonificados'])} de {int(linha_atual['n_ativos'])} ({pct_bonificados:.0f}%)",
+    )
+
+    # 4. Ticket médio do plantão no mês, com delta vs mês anterior - referência de base independente
+    # do programa em si (repasse bruto antes de qualquer aumento de nível).
+    ticket_medio_atual = (
+        linha_atual["valor_repasse"] / linha_atual["n_plantoes"] if linha_atual["n_plantoes"] > 0 else 0.0
+    )
+    ticket_medio_anterior = None
+    if linha_anterior is not None and linha_anterior["n_plantoes"] > 0:
+        ticket_medio_anterior = linha_anterior["valor_repasse"] / linha_anterior["n_plantoes"]
+    k4.metric(
+        "Ticket médio do plantão", fmt_brl(ticket_medio_atual),
+        delta=_delta_pct(ticket_medio_atual, ticket_medio_anterior), delta_color="off",
+    )
+
+    # 5. Custo médio por médico bonificado - eficiência do gasto (quanto custa, em média, manter
+    # cada médico no Nível 2+ naquele mês).
+    custo_medio_bonificado = (
+        linha_atual["custo_total"] / linha_atual["n_bonificados"] if linha_atual["n_bonificados"] > 0 else 0.0
+    )
+    k5.metric("Custo médio / médico bonificado", fmt_brl(custo_medio_bonificado))
+
+    st.caption(
+        f"Indicadores calculados sobre {linha_atual['anomes']}"
+        + (f", comparado a {linha_anterior['anomes']}." if linha_anterior is not None else ".")
+        + " \"Bonificado\" = Nível 2+ por volume do próprio mês (nivel_bruto, sem carência — mesmo "
+        "critério do pagamento, ver 'Regras do Programa')."
+    )
 
     st.stop()
 
