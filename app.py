@@ -631,7 +631,8 @@ with st.sidebar:
     pagina = st.radio(
         "Navegação",
         ["📊 Visão Geral", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
-         "📄 Relatório do Médico", "🗂️ Apoio (Local → Especialidade)", "🗄️ Base de Plantões"],
+         "📄 Relatório do Médico", "📣 Abordagem (quase lá)", "🗂️ Apoio (Local → Especialidade)",
+         "🗄️ Base de Plantões"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -687,52 +688,6 @@ with st.sidebar:
             if nivel_calc["min_fds"] > 0:
                 requisito += f", sendo ≥{nivel_calc['min_fds']} de FDS/Noturno"
             st.caption(requisito)
-
-    # ---------------------------------------------------------- QUASE NO PRÓXIMO NÍVEL
-    # Pedido do usuário (2026-08-21): a simulação "faltam X plantões pro próximo nível" já
-    # existia, mas só aparecia se alguém procurasse aquele médico específico - inverte a lógica
-    # pra dar visibilidade direta de quem já está perto, pro time abordar/incentivar ativamente
-    # antes do fim do mês (fecha o ciclo "meta -> incentivo ativo"). Mesmo cálculo de
-    # core.simular_todos_niveis já usado no relatório do médico - sem duplicar lógica.
-    snap_quase_la = core.status_atual(niveis_df, anomes_referencia=st.session_state["mes_atual"])
-    snap_quase_la = snap_quase_la[snap_quase_la["n_plantoes"] >= 1]
-    with st.expander("🎯 Quase no próximo nível", expanded=False):
-        limiar_quase_la = st.number_input(
-            "Até quantos plantões faltando conta como \"quase lá\"", min_value=1, max_value=10,
-            value=3, step=1, key="limiar_quase_la",
-        )
-        linhas_quase_la = []
-        for _, row_ql in snap_quase_la.iterrows():
-            sim_ql = core.simular_todos_niveis(row_ql)
-            if not sim_ql:
-                continue
-            prox_ql = sim_ql[0]
-            if 0 < prox_ql["faltam_plantoes"] <= limiar_quase_la:
-                linhas_quase_la.append({
-                    "medico": row_ql["medico"],
-                    "nivel_atual": int(row_ql["nivel_bruto"]),
-                    "proximo_nivel": prox_ql["nivel_idx"],
-                    "faltam_plantoes": prox_ql["faltam_plantoes"],
-                    "faltam_fds_ou_noturno": prox_ql["faltam_fds_ou_noturno"],
-                    "ganho_extra_estimado": prox_ql["ganho_extra_estimado"],
-                })
-        if not linhas_quase_la:
-            st.info(f"Nenhum médico a até {int(limiar_quase_la)} plantão(ões) do próximo nível neste mês.")
-        else:
-            df_quase_la = pd.DataFrame(linhas_quase_la).sort_values(
-                ["faltam_plantoes", "medico"], ascending=[True, True]
-            )
-            st.caption(f"{len(df_quase_la)} médico(s) — ordenado por quem está mais perto.")
-            st.dataframe(
-                df_quase_la.rename(columns={
-                    "medico": "Médico", "nivel_atual": "Nível atual",
-                    "proximo_nivel": "Próximo nível", "faltam_plantoes": "Faltam (plantões)",
-                    "faltam_fds_ou_noturno": "Faltam (FDS/Not.)",
-                    "ganho_extra_estimado": "Ganho extra estimado",
-                })
-                .style.format({"Ganho extra estimado": fmt_brl}),
-                use_container_width=True, hide_index=True,
-            )
 
     st.markdown("---")
 
@@ -1252,6 +1207,81 @@ if pagina == "📄 Relatório do Médico":
         st.stop()
 
     renderizar_relatorio_medico(nome_rel, st.session_state["mes_atual"])
+    st.stop()
+
+# ============================================================= PÁGINA: ABORDAGEM (QUASE LÁ)
+# Antes era um expander no sidebar - pedido do usuário (2026-08-21) pra virar página própria, com
+# nome do médico + especialidade + o que mais ajudar o escalista a abordar, na tela grande, e
+# opção de exportar em PDF. Mesmo cálculo de core.simular_todos_niveis já usado no relatório do
+# médico e no "Faltam p/ próximo nível" da Tabela de médicos - sem duplicar lógica.
+if pagina == "📣 Abordagem (quase lá)":
+    st.subheader("📣 Abordagem — médicos quase no próximo nível")
+    st.caption(
+        "Médicos a poucos plantões de subir de nível este mês — pro escalista abordar e "
+        "incentivar antes do fim do mês."
+    )
+
+    mes_abordagem = st.session_state["mes_atual"]
+    snap_abordagem = core.status_atual(niveis_df, anomes_referencia=mes_abordagem)
+    snap_abordagem = snap_abordagem[snap_abordagem["n_plantoes"] >= 1]
+
+    limiar_abordagem = st.number_input(
+        "Até quantos plantões faltando conta como \"quase lá\"", min_value=1, max_value=10,
+        value=3, step=1, key="limiar_abordagem",
+    )
+
+    linhas_abordagem = []
+    for _, row_ab in snap_abordagem.iterrows():
+        sim_ab = core.simular_todos_niveis(row_ab)
+        if not sim_ab:
+            continue
+        prox_ab = sim_ab[0]
+        if 0 < prox_ab["faltam_plantoes"] <= limiar_abordagem:
+            especialidades_ab = df_linhas.loc[df_linhas["medico"] == row_ab["medico"], "especialidade"]
+            especialidades_ab = especialidades_ab[especialidades_ab != ""]
+            moda_ab = especialidades_ab.mode()
+            especialidade_ab = moda_ab.iat[0] if not moda_ab.empty else "—"
+            linhas_abordagem.append({
+                "medico": row_ab["medico"],
+                "especialidade": especialidade_ab,
+                "n_plantoes": int(row_ab["n_plantoes"]),
+                "nivel_atual": int(row_ab["nivel_bruto"]),
+                "proximo_nivel": prox_ab["nivel_idx"],
+                "proximo_pct": prox_ab["pct_exibido"],
+                "faltam_plantoes": prox_ab["faltam_plantoes"],
+                "faltam_fds_ou_noturno": prox_ab["faltam_fds_ou_noturno"],
+                "ganho_extra_estimado": prox_ab["ganho_extra_estimado"],
+            })
+
+    if not linhas_abordagem:
+        st.info(f"Nenhum médico a até {int(limiar_abordagem)} plantão(ões) do próximo nível em {mes_abordagem}.")
+    else:
+        df_abordagem = pd.DataFrame(linhas_abordagem).sort_values(
+            ["faltam_plantoes", "medico"], ascending=[True, True]
+        )
+        st.markdown(f"#### {len(df_abordagem)} médico(s) — {mes_abordagem}")
+
+        pdf_abordagem = comunicado_pdf.gerar_pdf_abordagem(
+            df_abordagem.to_dict("records"), mes_abordagem
+        )
+        st.download_button(
+            "📄 Baixar PDF pra abordagem", data=pdf_abordagem,
+            file_name=f"abordagem_quase_la_{mes_abordagem}.pdf", mime="application/pdf",
+            type="primary",
+        )
+
+        st.dataframe(
+            df_abordagem.rename(columns={
+                "medico": "Médico", "especialidade": "Especialidade",
+                "n_plantoes": "Plantões no mês", "nivel_atual": "Nível atual",
+                "proximo_nivel": "Próximo nível", "proximo_pct": "% no próximo nível",
+                "faltam_plantoes": "Faltam (plantões)", "faltam_fds_ou_noturno": "Faltam (FDS/Not.)",
+                "ganho_extra_estimado": "Ganho extra estimado",
+            })
+            .style.format({"Ganho extra estimado": fmt_brl, "% no próximo nível": "{:.0f}%"}),
+            use_container_width=True, hide_index=True,
+        )
+
     st.stop()
 
 # ============================================================= PÁGINA: VISÃO GERAL

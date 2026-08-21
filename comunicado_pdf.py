@@ -308,3 +308,84 @@ def gerar_pdf_comunicado(
     doc.build(story)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def gerar_pdf_abordagem(linhas, mes_ref):
+    """PDF da lista '📣 Abordagem (quase lá)' - médicos a poucos plantões de subir de nível,
+    pro escalista imprimir/levar consigo pra abordar ativamente antes do fim do mês (pedido do
+    usuário 2026-08-21). Uso interno, NÃO é o comunicado individual do médico.
+
+    'linhas' é uma lista de dicts com medico/especialidade/n_plantoes/nivel_atual/proximo_nivel/
+    proximo_pct/faltam_plantoes/faltam_fds_ou_noturno/ganho_extra_estimado - mesmo formato que a
+    tela '📣 Abordagem (quase lá)' já monta pra exibir, sem duplicar o cálculo aqui."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        topMargin=1.8 * cm, bottomMargin=1.8 * cm, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        title=f"Abordagem — quase no próximo nível ({mes_ref})",
+    )
+    styles = getSampleStyleSheet()
+    cor_texto = colors.HexColor("#1F2937")
+    cor_texto_leve = colors.HexColor("#6B7280")
+    cor_linha = colors.HexColor("#E5E7EB")
+
+    subtitulo = ParagraphStyle(
+        "SubtituloAbordagem", parent=styles["Normal"], fontSize=11, textColor=cor_texto_leve,
+        spaceAfter=12,
+    )
+
+    story = [
+        Image(str(_LOGO_PATH), width=_LOGO_LARGURA, height=_LOGO_ALTURA, hAlign="LEFT"),
+        Spacer(1, 6),
+        Paragraph(f"Abordagem — médicos quase no próximo nível ({mes_ref})", subtitulo),
+        HRFlowable(width="100%", thickness=1, color=cor_linha),
+        Spacer(1, 10),
+    ]
+
+    cel_style = ParagraphStyle("CelAbordagem", parent=styles["Normal"], fontSize=8, leading=10)
+    linhas_tabela = [["Médico", "Especialidade", "Plantões", "Nível → Próx.", "Faltam",
+                       "FDS/Not.", "Ganho est."]]
+    for l in linhas:
+        linhas_tabela.append([
+            Paragraph(str(l["medico"]), cel_style),
+            Paragraph(str(l["especialidade"]), cel_style),
+            str(l["n_plantoes"]),
+            f"N{l['nivel_atual']} → N{l['proximo_nivel']} ({l['proximo_pct']}%)",
+            str(l["faltam_plantoes"]),
+            str(l["faltam_fds_ou_noturno"]),
+            _fmt_brl(l["ganho_extra_estimado"]),
+        ])
+
+    tabela = Table(
+        linhas_tabela, colWidths=[4.3 * cm, 2.8 * cm, 1.6 * cm, 3.2 * cm, 1.5 * cm, 1.7 * cm, 2.4 * cm],
+        repeatRows=1,
+    )
+    tabela.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.75, cor_texto),
+        ("ALIGN", (2, 0), (5, -1), "CENTER"),
+        ("ALIGN", (6, 0), (6, -1), "RIGHT"),
+    ]))
+    story.append(tabela)
+
+    story.append(Spacer(1, 20))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=cor_linha))
+    rodape_abordagem = ParagraphStyle(
+        "RodapeAbordagem", parent=styles["Normal"], fontSize=8, textColor=cor_texto_leve,
+        spaceBefore=6,
+    )
+    story.append(Paragraph(
+        f"CallMed Plantões — Grupo CM Callegaro · Emitido em {datetime.now().strftime('%d/%m/%Y')} "
+        "· Uso interno do time administrativo. Ganho estimado com base no ticket médio já "
+        "realizado no mês, sujeito a variação.",
+        rodape_abordagem,
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
