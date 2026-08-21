@@ -522,11 +522,38 @@ def consultar_config_supabase(client, chave, padrao=None):
     return resposta.data[0]["valor"]
 
 
-def salvar_config_supabase(client, chave, valor):
-    """Grava (upsert) uma config editável na tabela public.config."""
+def salvar_config_supabase(client, chave, valor, alterado_por=None):
+    """Grava (upsert) uma config editável na tabela public.config, e registra a mudança em
+    public.config_historico (quem, quando, valor antes/depois) - pedido do usuário 2026-08-21,
+    pra dar pra reconstruir "quais eram as regras vigentes num dia X" mesmo depois de editadas
+    (sem isso, editar uma regra reescreve o histórico de pagamento inteiro sem deixar rastro).
+    'alterado_por' é o nome/e-mail de quem está logado - None se não vier (ex.: chamadas de
+    script/migração)."""
+    valor_anterior = consultar_config_supabase(client, chave, None)
+    client.table("config_historico").insert({
+        "chave": chave, "valor_anterior": valor_anterior, "valor_novo": valor,
+        "alterado_por": alterado_por,
+    }).execute()
     client.table("config").upsert(
         {"chave": chave, "valor": valor}, on_conflict="chave"
     ).execute()
+
+
+def consultar_config_historico_supabase(client, limite=100):
+    """Le o log de auditoria das mudanças de configuração (tabela public.config_historico),
+    mais recente primeiro - usado na tela '⚙️ Regras do Programa' pra transparência de quem
+    mudou o quê e quando."""
+    resposta = (
+        client.table("config_historico")
+        .select("chave,valor_anterior,valor_novo,alterado_por,alterado_em")
+        .order("alterado_em", desc=True)
+        .limit(limite)
+        .execute()
+    )
+    return pd.DataFrame(
+        resposta.data,
+        columns=["chave", "valor_anterior", "valor_novo", "alterado_por", "alterado_em"],
+    )
 
 
 def consultar_rampup_supabase(client):
@@ -576,6 +603,20 @@ def calcular_rampup_por_medico_mes(df_linhas, rampup_df):
         return pd.DataFrame(columns=colunas_vazias)
     todos = pd.concat(partes, ignore_index=True)
     return todos.groupby(["medico", "anomes"], as_index=False)["custo_rampup_mes"].sum()
+
+
+def tipos_novos_no_mes(df_linhas, mes_ref):
+    """Tipos de pagamento (coluna 'Tipo') vistos no mes de referencia que NUNCA apareceram em
+    nenhum mes anterior da base inteira - sinal de que o sistema de escala (pegaplantao.com.br)
+    pode ter renomeado ou criado um Tipo novo, que ainda nao foi revisado pra saber se deve
+    contar ou nao pro nivel (TIPOS_NAO_CONTAM_VOLUME/GESTAO_TIPOS sao comparacao exata de string -
+    um Tipo renomeado silenciosamente passaria a contar errado, sem crash nenhum pra avisar).
+    Pedido do usuario 2026-08-21: pegar isso na hora, nao 3 meses depois."""
+    if df_linhas.empty:
+        return []
+    tipos_mes = set(df_linhas.loc[df_linhas["anomes"] == mes_ref, "tipo"].unique())
+    tipos_antes = set(df_linhas.loc[df_linhas["anomes"] < mes_ref, "tipo"].unique())
+    return sorted(t for t in (tipos_mes - tipos_antes) if t)
 
 
 def enviar_planilha_supabase(client, arquivo_upload):
@@ -737,11 +778,25 @@ def listar_medicos(agg):
     return sorted(agg["medico"].unique())
 
 
+MESES_TOLERANCIA_QUEDA_BENEFICIOS = 1
+
+
 def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=None):
     """Para cada medico, percorre cronologicamente os meses (desde o primeiro mes dele na base
     ate o mes mais recente) e calcula nivel_bruto, nivel_vestido (com carencia aplicada) e os
-    custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (reseta
-    carencia de nivel 2+, mas nao "sai" do historico).
+    custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (nao
+    "sai" do historico, mas conta como mes fraco pra carencia dos BENEFICIOS - ver "colchao"
+    abaixo).
+
+    "Colchao" contra queda pontual (pedido do usuario, 2026-08-20): um UNICO mes abaixo do
+    volume minimo (ex.: ferias, licenca, imprevisto) NAO reseta a carencia acumulada dos
+    BENEFICIOS (streaks[nivel_check]/nivel_vestido) - so reseta se acontecer por
+    MESES_TOLERANCIA_QUEDA_BENEFICIOS+1 meses SEGUIDOS (hoje = 2). No mes de "colchao", o streak
+    fica congelado (nao avanca, mas tambem nao volta a zero) - se o volume voltar no mes
+    seguinte, continua de onde parou, como se aquele mes fraco isolado nao tivesse acontecido pro
+    calculo de carencia. NAO afeta nivel_bruto/pagamento - esse continua 100% real-time, sem
+    colchao nenhum (o medico so RECEBE pelo nivel que o volume daquele mes realmente sustenta;
+    o colchao e so pra nao perder o acesso aos BENEFICIOS extras por um deslize pontual).
 
     IMPORTANTE (corrigido 2026-08-20, esclarecido pelo usuario): 'nivel_bruto' e 'nivel_vestido'
     tem papeis DIFERENTES agora - nivel_bruto (puro volume/FDS do mes, sem carencia) e quem
@@ -778,6 +833,7 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
         primeiro_idx = min(mes_para_indice[m] for m in grp.index)
         ultimo_idx = mes_para_indice[meses_todos[-1]]  # roda ate o fim da base pra todo mundo
         streaks = {2: 0, 3: 0, 4: 0}
+        meses_abaixo_seguidos = {2: 0, 3: 0, 4: 0}  # "colchao" - ver docstring da funcao
         for i in range(primeiro_idx, ultimo_idx + 1):
             am = meses_todos[i]
             if am in grp.index:
@@ -802,8 +858,13 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
             for nivel_check in (2, 3, 4):
                 if nivel_bruto >= nivel_check:
                     streaks[nivel_check] += 1
+                    meses_abaixo_seguidos[nivel_check] = 0
                 else:
-                    streaks[nivel_check] = 0
+                    meses_abaixo_seguidos[nivel_check] += 1
+                    if meses_abaixo_seguidos[nivel_check] > MESES_TOLERANCIA_QUEDA_BENEFICIOS:
+                        streaks[nivel_check] = 0
+                    # dentro da tolerancia (1º mes abaixo, por padrao): streak fica CONGELADO,
+                    # nem avanca nem reseta - "colchao" contra deslize pontual.
 
             nivel_vestido = 1
             for nivel_check in (2, 3, 4):

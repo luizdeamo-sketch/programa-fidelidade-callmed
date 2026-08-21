@@ -99,6 +99,41 @@ def badge_nivel(n):
     return f'<span style="background:{cores.get(n,"#999")};color:#111;padding:2px 10px;border-radius:12px;font-weight:600;">Nível {n}</span>'
 
 
+def texto_pagamento_vs_beneficios(nivel_pagamento, nivel_beneficios, pct_exibido_pagamento):
+    """Mensagem explicando a diferença entre nível de pagamento (volume real do mês, sem
+    carência) e nível de benefícios (carência aplicada) quando os dois divergem - cobre os DOIS
+    sentidos possíveis, não só um:
+
+    - Pagamento à frente (caso mais comum): o volume já sustenta um nível maior que os
+      benefícios liberados - carência ainda não foi cumprida pro nível novo.
+    - Benefícios à frente (caso do "colchão" contra queda pontual, ver
+      core.MESES_TOLERANCIA_QUEDA_BENEFICIOS): um mês mais fraco ISOLADO não reseta a carência
+      já conquistada - o médico continua com os benefícios do nível anterior mesmo com o
+      pagamento desse mês mais baixo, e só perde de verdade se acontecer de novo no mês seguinte.
+
+    Antes dessa função só existia o primeiro caso escrito 3x (copiado/colado) em lugares
+    diferentes - a mensagem ficava enganosa/invertida quando o colchão deixava os benefícios na
+    frente (achado real 2026-08-21, ao testar o colchão com dado sintético). Retorna None se os
+    dois níveis já são iguais (nada pra explicar)."""
+    if nivel_pagamento == nivel_beneficios:
+        return None
+    if nivel_pagamento > nivel_beneficios:
+        carencia_necessaria = core.NIVEL_POR_IDX[nivel_pagamento]["carencia_meses"]
+        return (
+            f"O pagamento já está no **Nível {nivel_pagamento}** ({pct_exibido_pagamento}% de "
+            f"aumento) — não espera carência. Mas os **benefícios extras** desse nível (seguro, "
+            f"cursos, licenças) só liberam depois de **{carencia_necessaria} mês(es) consecutivos** "
+            f"nesse volume; hoje os benefícios ativos ainda são os do **Nível {nivel_beneficios}**."
+        )
+    return (
+        f"O volume deste mês só sustenta o **Nível {nivel_pagamento}** ({pct_exibido_pagamento}% "
+        f"de aumento) no pagamento. Mas os **benefícios extras** continuam sendo os do "
+        f"**Nível {nivel_beneficios}** — um mês mais fraco isolado não tira o que já foi "
+        "conquistado (colchão de proteção); só reseta de verdade se acontecer de novo no mês "
+        "seguinte."
+    )
+
+
 def renderizar_simulacao_niveis(row):
     """Bloco 'Simulação — quanto falta pra cada nível acima' (pedido do usuário 2026-08-20,
     depois pedido de novo pra aparecer também ao selecionar o médico na Tabela de médicos da
@@ -246,18 +281,13 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
         )
 
         # Carencia (2/4/6 meses pra N2/N3/N4) so segura os BENEFICIOS extras (seguro, curso,
-        # licenca), nao o pagamento - esclarecido pelo usuario 2026-08-20. Se o nivel de
-        # pagamento (volume) ja passou do nivel de beneficios (carencia ainda não cumprida),
-        # avisa aqui pra não confundir o escalista/médico.
-        if nivel_pagamento_rel != nivel_beneficios_rel:
-            carencia_necessaria_rel = core.NIVEL_POR_IDX[nivel_pagamento_rel]["carencia_meses"]
-            st.info(
-                f"O pagamento já está no **Nível {nivel_pagamento_rel}** "
-                f"({info_pagamento_rel['pct_exibido']}% de aumento) — não espera carência. Mas os "
-                f"**benefícios extras** desse nível (seguro, cursos, licenças) só liberam depois de "
-                f"**{carencia_necessaria_rel} mês(es) consecutivos** nesse volume; hoje os benefícios "
-                f"ativos ainda são os do **Nível {nivel_beneficios_rel}**."
-            )
+        # licenca), nao o pagamento - esclarecido pelo usuario 2026-08-20. Avisa quando os dois
+        # niveis divergem, nos dois sentidos possiveis - ver texto_pagamento_vs_beneficios().
+        texto_divergencia_rel = texto_pagamento_vs_beneficios(
+            nivel_pagamento_rel, nivel_beneficios_rel, info_pagamento_rel["pct_exibido"]
+        )
+        if texto_divergencia_rel:
+            st.info(texto_divergencia_rel)
 
         st.markdown("---")
         renderizar_simulacao_niveis(atual_rel)
@@ -353,6 +383,10 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
         st.markdown(
             f"### Nível {nivel_pagamento_rel} — {info_pagamento_rel['pct_exibido']}% de aumento no plantão"
         )
+        st.caption(
+            "*% arredondado para exibição — o valor pago é calculado sobre a taxa exata "
+            "configurada no programa, pode diferir de poucos centavos do cálculo de cabeça."
+        )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Plantões no mês", int(atual_rel["n_plantoes"]))
         c2.metric("FDS/Noturno", int(atual_rel["n_fds_ou_noturno"]))
@@ -365,13 +399,11 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
         st.markdown("##### Benefícios inclusos")
         for beneficio in core.beneficios_acumulados(nivel_beneficios_rel):
             st.markdown(f"- {beneficio}")
-        if nivel_pagamento_rel != nivel_beneficios_rel:
-            st.caption(
-                f"Os benefícios acima são os do Nível {nivel_beneficios_rel} (tempo de carência já "
-                f"cumprido). O aumento no valor do plantão já é o do Nível {nivel_pagamento_rel} "
-                "desde já — os benefícios extras desse nível liberam em breve, sem precisar de "
-                "nenhum plantão a mais."
-            )
+        texto_divergencia_comunicado = texto_pagamento_vs_beneficios(
+            nivel_pagamento_rel, nivel_beneficios_rel, info_pagamento_rel["pct_exibido"]
+        )
+        if texto_divergencia_comunicado:
+            st.caption(texto_divergencia_comunicado)
 
         if prox_info_rel:
             partes_rel = []
@@ -557,6 +589,7 @@ def _restaurar_seguro():
     core.salvar_config_supabase(
         supabase_client.get_client(), "custo_seguro",
         {"vida_dit_funeral": core.CUSTO_SEGURO_VIDA_DIT_FUNERAL, "rcp": core.CUSTO_RCP},
+        alterado_por=st.session_state["usuario"]["nome"],
     )
 
 
@@ -566,7 +599,8 @@ def _restaurar_rampup():
     st.session_state["rampup_pct"] = 0.05
     st.session_state["rampup_duracao_meses"] = 3
     core.salvar_config_supabase(
-        supabase_client.get_client(), "rampup_params", {"pct": 0.05, "duracao_meses": 3}
+        supabase_client.get_client(), "rampup_params", {"pct": 0.05, "duracao_meses": 3},
+        alterado_por=st.session_state["usuario"]["nome"],
     )
 
 
@@ -605,7 +639,8 @@ with st.sidebar:
     with st.expander("🧮 Calculadora de plantão", expanded=False):
         st.caption(
             "Informe o valor basal de um plantão e veja quanto ele pagaria em cada nível do "
-            "programa (mesmos percentuais configurados em 'Regras do Programa')."
+            "programa (mesmos percentuais configurados em 'Regras do Programa'). O valor em R$ é "
+            "exato — o % ao lado é arredondado só pra exibição."
         )
         valor_basal_calc = st.number_input(
             "Valor basal do plantão (R$)", min_value=0.0, value=1000.0, step=50.0,
@@ -637,6 +672,52 @@ with st.sidebar:
                 requisito += f", sendo ≥{nivel_calc['min_fds']} de FDS/Noturno"
             st.caption(requisito)
 
+    # ---------------------------------------------------------- QUASE NO PRÓXIMO NÍVEL
+    # Pedido do usuário (2026-08-21): a simulação "faltam X plantões pro próximo nível" já
+    # existia, mas só aparecia se alguém procurasse aquele médico específico - inverte a lógica
+    # pra dar visibilidade direta de quem já está perto, pro time abordar/incentivar ativamente
+    # antes do fim do mês (fecha o ciclo "meta -> incentivo ativo"). Mesmo cálculo de
+    # core.simular_todos_niveis já usado no relatório do médico - sem duplicar lógica.
+    snap_quase_la = core.status_atual(niveis_df, anomes_referencia=st.session_state["mes_atual"])
+    snap_quase_la = snap_quase_la[snap_quase_la["n_plantoes"] >= 1]
+    with st.expander("🎯 Quase no próximo nível", expanded=False):
+        limiar_quase_la = st.number_input(
+            "Até quantos plantões faltando conta como \"quase lá\"", min_value=1, max_value=10,
+            value=3, step=1, key="limiar_quase_la",
+        )
+        linhas_quase_la = []
+        for _, row_ql in snap_quase_la.iterrows():
+            sim_ql = core.simular_todos_niveis(row_ql)
+            if not sim_ql:
+                continue
+            prox_ql = sim_ql[0]
+            if 0 < prox_ql["faltam_plantoes"] <= limiar_quase_la:
+                linhas_quase_la.append({
+                    "medico": row_ql["medico"],
+                    "nivel_atual": int(row_ql["nivel_bruto"]),
+                    "proximo_nivel": prox_ql["nivel_idx"],
+                    "faltam_plantoes": prox_ql["faltam_plantoes"],
+                    "faltam_fds_ou_noturno": prox_ql["faltam_fds_ou_noturno"],
+                    "ganho_extra_estimado": prox_ql["ganho_extra_estimado"],
+                })
+        if not linhas_quase_la:
+            st.info(f"Nenhum médico a até {int(limiar_quase_la)} plantão(ões) do próximo nível neste mês.")
+        else:
+            df_quase_la = pd.DataFrame(linhas_quase_la).sort_values(
+                ["faltam_plantoes", "medico"], ascending=[True, True]
+            )
+            st.caption(f"{len(df_quase_la)} médico(s) — ordenado por quem está mais perto.")
+            st.dataframe(
+                df_quase_la.rename(columns={
+                    "medico": "Médico", "nivel_atual": "Nível atual",
+                    "proximo_nivel": "Próximo nível", "faltam_plantoes": "Faltam (plantões)",
+                    "faltam_fds_ou_noturno": "Faltam (FDS/Not.)",
+                    "ganho_extra_estimado": "Ganho extra estimado",
+                })
+                .style.format({"Ganho extra estimado": fmt_brl}),
+                use_container_width=True, hide_index=True,
+            )
+
     st.markdown("---")
 
     # ---------------------------------------------------------- FONTE DE DADOS (upload + mesclagem)
@@ -647,6 +728,19 @@ with st.sidebar:
             "atualizar, envie uma planilha de qualquer período — o sistema identifica sozinho o "
             "que já existe (sobreposição, mantido) e o que é novo (incluído)."
         )
+        # Painel de "Tipo novo desconhecido" (pedido do usuário 2026-08-21): compara o mês em
+        # visualização contra a base inteira - pega na hora se o pegaplantao.com.br renomeou ou
+        # criou um Tipo de pagamento que TIPOS_NAO_CONTAM_VOLUME/GESTAO_TIPOS ainda não conhecem
+        # (comparação é string exata - uma renomeação silenciosa passaria batido, sem crash nenhum).
+        tipos_novos_mes = core.tipos_novos_no_mes(df_linhas, st.session_state["mes_atual"])
+        if tipos_novos_mes:
+            st.warning(
+                f"⚠️ {len(tipos_novos_mes)} Tipo(s) de pagamento novo(s) em "
+                f"{st.session_state['mes_atual']}, nunca visto(s) antes na base inteira: "
+                f"**{', '.join(tipos_novos_mes)}**. Confira se algum precisa entrar nas regras de "
+                "exclusão (Antecipação/Coordenação-Gestão) antes de fechar o mês."
+            )
+
         resumo_envio = st.session_state.pop("resumo_envio_planilha", None)
         if resumo_envio:
             st.success(
@@ -839,14 +933,18 @@ if pagina == "🏥 Operações":
             )
             st.session_state["operacoes_excluidas"] = novas_excluidas
             core.salvar_config_supabase(
-                supabase_client.get_client(), "operacoes_excluidas", list(novas_excluidas)
+                supabase_client.get_client(), "operacoes_excluidas", list(novas_excluidas),
+                alterado_por=usuario["nome"],
             )
             st.session_state["sucesso_operacoes"] = True
             st.rerun()
         if st.button("↩️ Restaurar padrão (só Anestesia, fora Mário Covas/Amhemed)"):
             padrao = core.operacoes_excluidas_por_padrao(df_linhas)
             st.session_state["operacoes_excluidas"] = padrao
-            core.salvar_config_supabase(supabase_client.get_client(), "operacoes_excluidas", list(padrao))
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "operacoes_excluidas", list(padrao),
+                alterado_por=usuario["nome"],
+            )
             st.rerun()
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")
@@ -878,12 +976,17 @@ if pagina == "👔 Gestores":
         )
         if st.button("✅ Aplicar e recalcular", type="primary"):
             st.session_state["medicos_gestores"] = set(selecionados)
-            core.salvar_config_supabase(supabase_client.get_client(), "medicos_gestores", selecionados)
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "medicos_gestores", selecionados,
+                alterado_por=usuario["nome"],
+            )
             st.session_state["sucesso_gestores"] = True
             st.rerun()
         if st.button("↩️ Limpar lista"):
             st.session_state["medicos_gestores"] = set()
-            core.salvar_config_supabase(supabase_client.get_client(), "medicos_gestores", [])
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "medicos_gestores", [], alterado_por=usuario["nome"],
+            )
             st.rerun()
     else:
         st.caption("Somente leitura — edição é exclusiva do papel master.")
@@ -973,12 +1076,18 @@ if pagina == "⚙️ Regras do Programa":
             st.session_state["avisos_config"] = bool(avisos)
             st.session_state["sucesso_config"] = True
             st.session_state["niveis_custom"] = novos_niveis
-            core.salvar_config_supabase(supabase_client.get_client(), "niveis_custom", novos_niveis)
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "niveis_custom", novos_niveis,
+                alterado_por=usuario["nome"],
+            )
             st.rerun()
         if cbtn2.button("↩️ Restaurar padrão", key="btn_restaurar_niveis"):
             padrao_niveis = copy.deepcopy(core.NIVEIS)
             st.session_state["niveis_custom"] = padrao_niveis
-            core.salvar_config_supabase(supabase_client.get_client(), "niveis_custom", padrao_niveis)
+            core.salvar_config_supabase(
+                supabase_client.get_client(), "niveis_custom", padrao_niveis,
+                alterado_por=usuario["nome"],
+            )
             st.rerun()
         st.caption(
             "O recálculo roda o histórico inteiro de novo com as regras editadas (afeta "
@@ -1019,6 +1128,7 @@ if pagina == "⚙️ Regras do Programa":
                     "vida_dit_funeral": st.session_state["custo_seguro_vida_dit_funeral"],
                     "rcp": st.session_state["custo_seguro_rcp"],
                 },
+                alterado_por=usuario["nome"],
             )
             st.session_state["sucesso_seguro"] = True
             st.rerun()
@@ -1064,6 +1174,7 @@ if pagina == "⚙️ Regras do Programa":
             core.salvar_config_supabase(
                 supabase_client.get_client(), "rampup_params",
                 {"pct": st.session_state["rampup_pct"], "duracao_meses": st.session_state["rampup_duracao_meses"]},
+                alterado_por=usuario["nome"],
             )
             st.session_state["sucesso_rampup"] = True
             st.rerun()
@@ -1074,6 +1185,38 @@ if pagina == "⚙️ Regras do Programa":
         st.caption(
             f"{st.session_state['rampup_pct'] * 100:.2f}% sobre o repasse, por "
             f"{st.session_state['rampup_duracao_meses']} meses (padrão configurado pelo master)."
+        )
+
+    # ---------------------------------------------------------- HISTÓRICO DE MUDANÇAS NAS REGRAS
+    # Pedido do usuário (2026-08-21): editar uma regra recalcula o histórico de pagamento inteiro
+    # sem deixar rastro de quem mudou o quê - log simples (quem, quando, antes/depois) pra dar pra
+    # reconstruir quais eram as regras vigentes num mês passado mesmo depois de editadas.
+    st.markdown("---")
+    st.markdown("#### 📜 Histórico de mudanças nas regras")
+    historico_config = core.consultar_config_historico_supabase(supabase_client.get_client())
+    if historico_config.empty:
+        st.caption("Nenhuma mudança registrada ainda.")
+    else:
+        nomes_chave_historico = {
+            "niveis_custom": "Níveis, carência e % de aumento",
+            "operacoes_excluidas": "Operações excluídas",
+            "medicos_gestores": "Gestores manuais",
+            "custo_seguro": "Custo do seguro",
+            "rampup_params": "Parâmetros de ramp-up",
+        }
+        st.dataframe(
+            historico_config.assign(
+                chave=historico_config["chave"].map(lambda c: nomes_chave_historico.get(c, c)),
+                valor_anterior=historico_config["valor_anterior"].apply(
+                    lambda v: json.dumps(v, ensure_ascii=False) if v is not None else "(nenhum valor salvo antes)"
+                ),
+                valor_novo=historico_config["valor_novo"].apply(lambda v: json.dumps(v, ensure_ascii=False)),
+            )
+            .rename(columns={
+                "chave": "O que mudou", "valor_anterior": "Antes", "valor_novo": "Depois",
+                "alterado_por": "Quem", "alterado_em": "Quando",
+            }),
+            use_container_width=True, hide_index=True,
         )
 
     st.stop()
@@ -1299,14 +1442,11 @@ if nome:
         f"Nível 3: {meses_por_nivel_c[3]} · Nível 4: {meses_por_nivel_c[4]}."
     )
 
-    if nivel_pagamento_c != nivel_beneficios_c:
-        carencia_necessaria_c = core.NIVEL_POR_IDX[nivel_pagamento_c]["carencia_meses"]
-        st.info(
-            f"O pagamento já está no **Nível {nivel_pagamento_c}** ({info_nivel_c['pct_exibido']}% "
-            f"de aumento) — não espera carência. Mas os **benefícios extras** desse nível (seguro, "
-            f"cursos, licenças) só liberam depois de **{carencia_necessaria_c} mês(es) consecutivos** "
-            f"nesse volume; hoje os benefícios ativos ainda são os do **Nível {nivel_beneficios_c}**."
-        )
+    texto_divergencia_c = texto_pagamento_vs_beneficios(
+        nivel_pagamento_c, nivel_beneficios_c, info_nivel_c["pct_exibido"]
+    )
+    if texto_divergencia_c:
+        st.info(texto_divergencia_c)
 
     # Simulação "quanto falta pra cada nível acima" (pedido do usuário, 2026-08-20) - função
     # compartilhada com renderizar_relatorio_medico, ver renderizar_simulacao_niveis().

@@ -140,6 +140,16 @@ def gerar_pdf_comunicado(
         ),
         Spacer(1, 6),
         Paragraph(f"NÍVEL {int(nivel_pagamento)} — {pct_aumento_exibido}% de aumento no plantão", badge_style),
+        # % exibido e arredondado (ex.: Nivel 4 mostra 5%, valor real usa 4,5%) - notinha pra nao
+        # parecer que bateu errado se alguem conferir o calculo de cabeca (pedido do usuario,
+        # 2026-08-21, pra nao virar risco de confianca agora que o PDF vai pro medico de verdade).
+        Paragraph(
+            "*% de aumento arredondado para exibição — o valor da bonificação abaixo é calculado "
+            "sobre a taxa exata configurada no programa, pode diferir de poucos centavos do "
+            "cálculo de cabeça com o % arredondado.",
+            ParagraphStyle("CaveatPct", parent=styles["Normal"], fontSize=7.5,
+                            textColor=cor_texto_leve, spaceBefore=2, spaceAfter=10),
+        ),
     ]
 
     linhas_tabela = [
@@ -217,10 +227,24 @@ def gerar_pdf_comunicado(
         # esse glifo, mesmo problema documentado pra emoji/simbolos fora do Latin-1.
         story.append(Paragraph(f"-  {b}", beneficio_style))
     if int(nivel_pagamento) != int(nivel_beneficios):
+        # Cobre os dois sentidos - pagamento a frente (caso normal) e beneficios a frente (caso
+        # do "colchao" contra queda pontual - um mes fraco isolado nao tira o que ja foi
+        # conquistado, ver core.MESES_TOLERANCIA_QUEDA_BENEFICIOS). Achado real 2026-08-21: essa
+        # nota so cobria o primeiro sentido, ficava invertida/enganosa no segundo caso.
+        if int(nivel_pagamento) > int(nivel_beneficios):
+            texto_caveat_beneficios = (
+                f"O aumento no valor do plantão já é o do Nível {int(nivel_pagamento)} desde já "
+                f"(não espera carência). Os benefícios extras do Nível {int(nivel_pagamento)} "
+                "(seguro, cursos, licenças) liberam assim que a carência desse nível for cumprida."
+            )
+        else:
+            texto_caveat_beneficios = (
+                f"O volume deste mês sustenta o Nível {int(nivel_pagamento)} no aumento do "
+                f"plantão. Os benefícios extras continuam sendo os do Nível {int(nivel_beneficios)} "
+                "— um mês mais fraco isolado não tira o que já foi conquistado."
+            )
         story.append(Paragraph(
-            f"O aumento no valor do plantão já é o do Nível {int(nivel_pagamento)} desde já "
-            f"(não espera carência). Os benefícios extras do Nível {int(nivel_pagamento)} (seguro, "
-            "cursos, licenças) liberam assim que a carência desse nível for cumprida.",
+            texto_caveat_beneficios,
             ParagraphStyle("CaveatBeneficios", parent=styles["Normal"], fontSize=8.5,
                             textColor=cor_texto_leve, spaceBefore=4),
         ))
