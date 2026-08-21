@@ -46,7 +46,8 @@ GO_LIVE = "2026-09"
 # pontual foi pro ar mas o site continuou mostrando o numero de antes por um bom tempo). As 3
 # funcoes cacheadas de app.py recebem esse numero como argumento explicito extra justamente pra
 # forcar cache miss sempre que ele mudar aqui - bump toda vez que mexer na logica interna.
-LOGICA_NEGOCIO_VERSAO = 2  # 2 = colchao contra queda pontual (MESES_TOLERANCIA_QUEDA_BENEFICIOS)
+LOGICA_NEGOCIO_VERSAO = 3  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
+# novas, mesmo calculo de antes - ver "risco de queda de beneficio" na pagina Abordagem)
 
 PLACEHOLDERS_MEDICO = {"<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm"}
 GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
@@ -905,6 +906,15 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 # tempo_no_nivel_atual() abaixo, que e sobre o nivel_vestido/beneficios).
                 "streak_nivel_bruto": streaks[nivel_bruto] if nivel_bruto >= 2 else None,
                 "streak_n2": streaks[2], "streak_n3": streaks[3], "streak_n4": streaks[4],
+                # meses_abaixo_n{X} = quantos meses SEGUIDOS o volume já ficou abaixo do nível X,
+                # dentro da janela de tolerância do colchão (nunca passa de
+                # MESES_TOLERANCIA_QUEDA_BENEFICIOS - se passasse, o streak já teria resetado e
+                # nivel_vestido já teria caído). >=1 pro nivel_vestido atual = "está no mês de
+                # tolerância agora, um mês fraco a mais perde o benefício" - ver "risco de queda de
+                # benefício" na página Abordagem (pedido do usuário 2026-08-21).
+                "meses_abaixo_n2": meses_abaixo_seguidos[2],
+                "meses_abaixo_n3": meses_abaixo_seguidos[3],
+                "meses_abaixo_n4": meses_abaixo_seguidos[4],
                 "custo_seguro_mes": custo_seguro, "custo_aumento_pct_mes": custo_aumento_pct,
                 "valor_total_geral": valor_total_geral,
             })
@@ -1050,6 +1060,95 @@ def tempo_no_nivel_atual(row, niveis=None):
     carencia = niveis_para_dict(niveis)[nivel_vestido]["carencia_meses"]
     streak = int(row.get(f"streak_n{nivel_vestido}", 0))
     return max(1, streak - carencia)
+
+
+def risco_queda_beneficio(row, niveis=None):
+    """Dado um snapshot-row de status_atual, avalia se o médico está DENTRO do mês de tolerância
+    do colchão pro nivel_vestido atual - ou seja, o volume deste mês já ficou abaixo do mínimo do
+    nível de benefício, mas o "colchão" ainda está segurando (não resetou a carência ainda). Um
+    mês fraco A MAIS reseta o streak e derruba o benefício pra valer (ver
+    MESES_TOLERANCIA_QUEDA_BENEFICIOS/calcular_niveis). Retorna None se não estiver em risco
+    (Nível 1, sem carência pra perder, ou o mês atual já sustentou o volume exigido).
+
+    Pedido do usuário (2026-08-21): contraparte da "Abordagem (quase lá)" - dar visibilidade de
+    quem está prestes a CAIR de nível, não só quem está prestes a SUBIR, pro escalista poder agir
+    antes de perder o benefício (não antes de ganhar)."""
+    niveis = niveis or NIVEIS
+    nivel_vestido = int(row["nivel_vestido"])
+    if nivel_vestido < 2:
+        return None
+    meses_abaixo = int(row.get(f"meses_abaixo_n{nivel_vestido}", 0))
+    if meses_abaixo < 1:
+        return None
+    alvo = niveis_para_dict(niveis)[nivel_vestido]
+    faltam_plantoes = max(0, alvo["min_plantoes"] - int(row["n_plantoes"]))
+    faltam_fds_ou_noturno = max(0, alvo["min_fds"] - int(row["n_fds_ou_noturno"]))
+    return {
+        "nivel_beneficio": nivel_vestido,
+        "nivel_bruto_atual": int(row["nivel_bruto"]),
+        "meses_tolerancia_consumidos": meses_abaixo,
+        "meses_tolerancia_total": MESES_TOLERANCIA_QUEDA_BENEFICIOS,
+        "faltam_plantoes": faltam_plantoes,
+        "faltam_fds_ou_noturno": faltam_fds_ou_noturno,
+    }
+
+
+def custo_por_operacao_mes(df_linhas, niveis_df, rampup_df, mes_ref):
+    """Quebra o custo do programa (aumento % + ramp-up) por operação/hospital no mês de
+    referência - pedido do usuário (2026-08-21), pra enxergar onde o programa concentra custo, não
+    só o total agregado.
+
+    O bônus de ramp-up já É por operação por construção (o disparo escolhe a operação) - soma
+    direta, exata. Já o % de aumento é um atributo do MÉDICO/nível (calculado em cima do repasse
+    TOTAL do médico no mês, todas as operações somadas) - não existe uma "fatia exata" dele por
+    hospital quando o médico atende mais de um. Aqui ele é ALOCADO proporcionalmente ao share de
+    valor_repasse de cada operação dentro do repasse elegível do médico naquele mês - é uma
+    estimativa de concentração, não uma contabilização exata por hospital (mesmo espírito do "%
+    aproximado" já sinalizado em outras telas)."""
+    colunas_vazias = ["operacao", "custo_aumento_alocado", "custo_rampup", "custo_total", "n_medicos"]
+    if df_linhas.empty or niveis_df.empty:
+        return pd.DataFrame(columns=colunas_vazias)
+
+    linhas_mes = df_linhas[(df_linhas["anomes"] == mes_ref) & df_linhas["conta_pro_nivel"]]
+    if linhas_mes.empty:
+        return pd.DataFrame(columns=colunas_vazias)
+
+    # Share de cada operação no repasse do médico naquele mês (base do rateio do aumento %).
+    repasse_por_op = linhas_mes.groupby(["medico", "operacao"])["valor"].sum().reset_index()
+    repasse_total_medico = repasse_por_op.groupby("medico")["valor"].transform("sum")
+    repasse_por_op["share"] = repasse_por_op["valor"] / repasse_total_medico
+
+    custo_medico_mes = niveis_df.loc[niveis_df["anomes"] == mes_ref, ["medico", "custo_aumento_pct_mes"]]
+    repasse_por_op = repasse_por_op.merge(custo_medico_mes, on="medico", how="left")
+    repasse_por_op["custo_aumento_pct_mes"] = repasse_por_op["custo_aumento_pct_mes"].fillna(0.0)
+    repasse_por_op["custo_aumento_alocado"] = repasse_por_op["custo_aumento_pct_mes"] * repasse_por_op["share"]
+
+    aumento_por_op = repasse_por_op.groupby("operacao").agg(
+        custo_aumento_alocado=("custo_aumento_alocado", "sum"),
+        n_medicos=("medico", "nunique"),
+    ).reset_index()
+
+    # Ramp-up: exato, sem rateio - a operação já vem do próprio disparo.
+    partes_rampup = []
+    if rampup_df is not None and not rampup_df.empty:
+        for _, disparo in rampup_df.iterrows():
+            meses_disparo = set(disparo["meses"] or [])
+            if mes_ref not in meses_disparo:
+                continue
+            valor_op = linhas_mes.loc[linhas_mes["operacao"] == disparo["operacao"], "valor"].sum()
+            if valor_op:
+                partes_rampup.append({"operacao": disparo["operacao"], "custo_rampup": valor_op * float(disparo["pct"])})
+    rampup_por_op = (
+        pd.DataFrame(partes_rampup).groupby("operacao", as_index=False)["custo_rampup"].sum()
+        if partes_rampup else pd.DataFrame(columns=["operacao", "custo_rampup"])
+    )
+
+    resultado = aumento_por_op.merge(rampup_por_op, on="operacao", how="outer")
+    resultado["custo_aumento_alocado"] = resultado["custo_aumento_alocado"].fillna(0.0)
+    resultado["custo_rampup"] = resultado["custo_rampup"].fillna(0.0)
+    resultado["n_medicos"] = resultado["n_medicos"].fillna(0).astype(int)
+    resultado["custo_total"] = resultado["custo_aumento_alocado"] + resultado["custo_rampup"]
+    return resultado.sort_values("custo_total", ascending=False).reset_index(drop=True)
 
 
 def meses_por_nivel(hist_medico, campo="nivel_bruto"):

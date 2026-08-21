@@ -310,6 +310,142 @@ def gerar_pdf_comunicado(
     return buffer.getvalue()
 
 
+def gerar_pdf_analitico(df_mensal, indicadores, mes_ref, custo_por_operacao=None):
+    """PDF da página '📈 Analítico' - custo mensal do programa (histórico completo) + os
+    indicadores macro do mês selecionado, pra levar pra reunião/diretoria sem print de tela
+    (pedido do usuário 2026-08-21). Uso interno.
+
+    'df_mensal' é uma lista de dicts (mesmo formato da tabela da tela: anomes/custo_aumento/
+    custo_rampup/custo_total). 'indicadores' é um dict com os 5 indicadores macro já calculados:
+    mes_ref, mes_anterior (ou None), custo_total, delta_custo_total_pct (ou None),
+    pct_custo_repasse, n_bonificados, n_ativos, pct_bonificados, ticket_medio,
+    delta_ticket_medio_pct (ou None), custo_medio_bonificado. 'custo_por_operacao' é opcional -
+    lista de dicts com operacao/custo_aumento_alocado/custo_rampup/custo_total/n_medicos (mesmo
+    formato de core.custo_por_operacao_mes)."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=letter,
+        topMargin=1.8 * cm, bottomMargin=1.8 * cm, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+        title=f"Analítico CallMed Premium — {mes_ref}",
+    )
+    styles = getSampleStyleSheet()
+    cor_texto = colors.HexColor("#1F2937")
+    cor_texto_leve = colors.HexColor("#6B7280")
+    cor_linha = colors.HexColor("#E5E7EB")
+
+    subtitulo = ParagraphStyle(
+        "SubtituloAnalitico", parent=styles["Normal"], fontSize=11, textColor=cor_texto_leve,
+        spaceAfter=12,
+    )
+    h2 = ParagraphStyle(
+        "H2Analitico", parent=styles["Heading2"], fontSize=13, spaceBefore=16, spaceAfter=8,
+        textColor=cor_texto,
+    )
+    cel_style = ParagraphStyle("CelAnalitico", parent=styles["Normal"], fontSize=8, leading=10)
+
+    story = [
+        Image(str(_LOGO_PATH), width=_LOGO_LARGURA, height=_LOGO_ALTURA, hAlign="LEFT"),
+        Spacer(1, 6),
+        Paragraph(f"Analítico — visão histórica do programa (referência: {mes_ref})", subtitulo),
+        HRFlowable(width="100%", thickness=1, color=cor_linha),
+    ]
+
+    # ---------------------------------------------------------- CUSTO MENSAL DO PROGRAMA
+    story.append(Paragraph("Custo mensal do programa", h2))
+    linhas_mensal = [["Mês", "Aumento % (nível)", "Bônus ramp-up", "Custo total"]]
+    for m in df_mensal:
+        linhas_mensal.append([
+            m["anomes"], _fmt_brl(m["custo_aumento"]), _fmt_brl(m["custo_rampup"]),
+            _fmt_brl(m["custo_total"]),
+        ])
+    tabela_mensal = Table(linhas_mensal, colWidths=[3 * cm, 4.7 * cm, 4.7 * cm, 4.7 * cm], repeatRows=1)
+    tabela_mensal.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.75, cor_texto),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.4, cor_linha),
+    ]))
+    story.append(tabela_mensal)
+
+    # ---------------------------------------------------------- CUSTO POR OPERAÇÃO
+    if custo_por_operacao:
+        story.append(Paragraph(f"Custo por operação/hospital — {mes_ref}", h2))
+        story.append(Paragraph(
+            "Aumento % alocado proporcionalmente ao repasse de cada operação dentro do total do "
+            "médico no mês (estimativa de concentração, não contabilização exata) — o bônus de "
+            "ramp-up já é exato por operação.",
+            ParagraphStyle("CaveatOperacao", parent=styles["Normal"], fontSize=7.5,
+                            textColor=cor_texto_leve, spaceAfter=6),
+        ))
+        linhas_op = [["Operação", "Aumento alocado", "Ramp-up", "Total", "Médicos"]]
+        for o in custo_por_operacao:
+            linhas_op.append([
+                Paragraph(str(o["operacao"]), cel_style), _fmt_brl(o["custo_aumento_alocado"]),
+                _fmt_brl(o["custo_rampup"]), _fmt_brl(o["custo_total"]), str(o["n_medicos"]),
+            ])
+        tabela_op = Table(
+            linhas_op, colWidths=[5.2 * cm, 3.5 * cm, 3 * cm, 3 * cm, 2.4 * cm], repeatRows=1,
+        )
+        tabela_op.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3F4F6")),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.75, cor_texto),
+            ("LINEBELOW", (0, 1), (-1, -1), 0.4, cor_linha),
+        ]))
+        story.append(tabela_op)
+
+    # ---------------------------------------------------------- INDICADORES MACRO
+    story.append(Paragraph(f"Indicadores macro — {indicadores['mes_ref']}", h2))
+    linhas_ind = [
+        ["Custo total do mês", _fmt_brl(indicadores["custo_total"])
+         + (f" ({indicadores['delta_custo_total_pct']:+.1f}% vs {indicadores['mes_anterior']})"
+            if indicadores.get("delta_custo_total_pct") is not None else "")],
+        ["Custo do programa / repasse total", f"{indicadores['pct_custo_repasse']:.1f}%"],
+        ["Médicos bonificados (N2+)",
+         f"{indicadores['n_bonificados']} de {indicadores['n_ativos']} "
+         f"({indicadores['pct_bonificados']:.0f}%)"],
+        ["Ticket médio do plantão", _fmt_brl(indicadores["ticket_medio"])
+         + (f" ({indicadores['delta_ticket_medio_pct']:+.1f}% vs {indicadores['mes_anterior']})"
+            if indicadores.get("delta_ticket_medio_pct") is not None else "")],
+        ["Custo médio / médico bonificado", _fmt_brl(indicadores["custo_medio_bonificado"])],
+    ]
+    tabela_ind = Table(linhas_ind, colWidths=[8 * cm, 9.4 * cm])
+    tabela_ind.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, cor_linha),
+        ("TEXTCOLOR", (0, 0), (0, -1), cor_texto_leve),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica-Bold"),
+    ]))
+    story.append(tabela_ind)
+
+    story.append(Spacer(1, 20))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=cor_linha))
+    rodape_analitico = ParagraphStyle(
+        "RodapeAnalitico", parent=styles["Normal"], fontSize=8, textColor=cor_texto_leve,
+        spaceBefore=6,
+    )
+    story.append(Paragraph(
+        f"CallMed Plantões — Grupo CM Callegaro · Emitido em {datetime.now().strftime('%d/%m/%Y')} "
+        "· Uso interno do time administrativo. Custo de seguro não entra em nenhum número aqui.",
+        rodape_analitico,
+    ))
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def gerar_pdf_abordagem(linhas, mes_ref):
     """PDF da lista '📣 Abordagem (quase lá)' - médicos a poucos plantões de subir de nível,
     pro escalista imprimir/levar consigo pra abordar ativamente antes do fim do mês (pedido do

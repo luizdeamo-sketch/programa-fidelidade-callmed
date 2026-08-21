@@ -1282,6 +1282,61 @@ if pagina == "📣 Abordagem (quase lá)":
             use_container_width=True, hide_index=True,
         )
 
+    # ------------------------------------------------------- RISCO DE QUEDA DE BENEFÍCIO
+    # Contraparte do quadro acima (pedido do usuário, 2026-08-21): quem está prestes a CAIR de
+    # nível, não só quem está prestes a SUBIR. Usa o mesmo "colchão" já implementado em
+    # core.calcular_niveis (MESES_TOLERANCIA_QUEDA_BENEFICIOS) - hoje invisível pra tela, só
+    # segurava a carência por baixo dos panos.
+    st.markdown("---")
+    st.markdown("#### ⚠️ Risco de queda de benefício")
+    st.caption(
+        "Médicos que já tiveram um mês abaixo do volume mínimo do nível de benefício atual, mas "
+        "o \"colchão\" (tolerância de 1 mês) ainda está segurando — um mês fraco A MAIS reseta a "
+        "carência e derruba o benefício pra valer. O aumento no valor do plantão (pagamento) não "
+        "é afetado por isso — só os benefícios extras (seguro, cursos, licenças)."
+    )
+    linhas_risco = []
+    for _, row_risco in snap_abordagem.iterrows():
+        risco = core.risco_queda_beneficio(row_risco)
+        if risco is None:
+            continue
+        especialidades_risco = df_linhas.loc[df_linhas["medico"] == row_risco["medico"], "especialidade"]
+        especialidades_risco = especialidades_risco[especialidades_risco != ""]
+        moda_risco = especialidades_risco.mode()
+        especialidade_risco = moda_risco.iat[0] if not moda_risco.empty else "—"
+        linhas_risco.append({
+            "medico": row_risco["medico"],
+            "especialidade": especialidade_risco,
+            "nivel_beneficio": risco["nivel_beneficio"],
+            "nivel_bruto_atual": risco["nivel_bruto_atual"],
+            "tolerancia": f"{risco['meses_tolerancia_consumidos']} de {risco['meses_tolerancia_total']}",
+            "faltam_plantoes": risco["faltam_plantoes"],
+            "faltam_fds_ou_noturno": risco["faltam_fds_ou_noturno"],
+        })
+
+    if not linhas_risco:
+        st.info(f"Nenhum médico em risco de perder benefício em {mes_abordagem}.")
+    else:
+        df_risco = pd.DataFrame(linhas_risco).sort_values(
+            ["nivel_beneficio", "medico"], ascending=[False, True]
+        )
+        st.markdown(f"##### {len(df_risco)} médico(s) — {mes_abordagem}")
+        st.dataframe(
+            df_risco.rename(columns={
+                "medico": "Médico", "especialidade": "Especialidade",
+                "nivel_beneficio": "Nível de benefício (em risco)",
+                "nivel_bruto_atual": "Nível sustentado este mês (pagamento)",
+                "tolerancia": "Meses de tolerância consumidos",
+                "faltam_plantoes": "Faltou (plantões) este mês",
+                "faltam_fds_ou_noturno": "Faltou (FDS/Not.) este mês",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Se o próximo mês também vier abaixo do mínimo do nível de benefício, a carência "
+            "reseta e o médico cai pro nível que o volume realmente sustentar."
+        )
+
     st.stop()
 
 # ============================================================= PÁGINA: ANALÍTICO
@@ -1325,6 +1380,97 @@ if pagina == "📈 Analítico":
         st.info("Sem dados suficientes pra montar a visão analítica ainda.")
         st.stop()
 
+    # ---- Mês de referência dos recortes mensais (operação/indicadores/concentração) - mesmo
+    # "📅 Mês de referência" do sidebar, com delta vs o mês imediatamente anterior NA TABELA (não
+    # necessariamente calendário-anterior, se houver buraco sem nenhum médico ativo). Mês
+    # futuro/sem médico ativo ainda (agenda sendo montada) cai pro último mês com dado de verdade.
+    mes_analitico = st.session_state["mes_atual"]
+    if mes_analitico in df_mensal["anomes"].values:
+        idx_linha_atual = df_mensal.index[df_mensal["anomes"] == mes_analitico][0]
+    else:
+        idx_linha_atual = df_mensal.index[-1]
+    linha_atual = df_mensal.loc[idx_linha_atual]
+    linha_anterior = df_mensal.loc[idx_linha_atual - 1] if idx_linha_atual > 0 else None
+    mes_ref_analitico = linha_atual["anomes"]
+
+    def _delta_pct(atual, anterior):
+        if anterior is None or anterior == 0:
+            return None
+        return (atual - anterior) / anterior * 100
+
+    def _delta_texto(pct):
+        return None if pct is None else f"{pct:+.1f}% vs {linha_anterior['anomes']}"
+
+    # ---- Custo por operação/hospital no mês (item 3) ----
+    df_operacao = core.custo_por_operacao_mes(
+        df_linhas, niveis_df, st.session_state["rampup_disparos"], mes_ref_analitico
+    )
+
+    # ---- Indicadores macro (item 5, já existente) ----
+    pct_custo_sobre_repasse = (
+        (linha_atual["custo_total"] / linha_atual["valor_repasse"] * 100)
+        if linha_atual["valor_repasse"] > 0 else 0.0
+    )
+    pct_bonificados = (
+        (linha_atual["n_bonificados"] / linha_atual["n_ativos"] * 100)
+        if linha_atual["n_ativos"] > 0 else 0.0
+    )
+    ticket_medio_atual = (
+        linha_atual["valor_repasse"] / linha_atual["n_plantoes"] if linha_atual["n_plantoes"] > 0 else 0.0
+    )
+    ticket_medio_anterior = None
+    if linha_anterior is not None and linha_anterior["n_plantoes"] > 0:
+        ticket_medio_anterior = linha_anterior["valor_repasse"] / linha_anterior["n_plantoes"]
+    custo_medio_bonificado = (
+        linha_atual["custo_total"] / linha_atual["n_bonificados"] if linha_atual["n_bonificados"] > 0 else 0.0
+    )
+    delta_custo_total_pct = _delta_pct(
+        linha_atual["custo_total"], linha_anterior["custo_total"] if linha_anterior is not None else None
+    )
+    delta_ticket_medio_pct = _delta_pct(ticket_medio_atual, ticket_medio_anterior)
+
+    # ---- Concentração de risco no mês (item 4) - quanto do custo do programa está em cima de
+    # poucos médicos-chave (dependência de poucas pessoas). Rankeado pelo custo do PROGRAMA
+    # (aumento % + ramp-up), não pelo valor total recebido (que inclui o repasse base).
+    snap_conc = niveis_df[
+        (niveis_df["anomes"] == mes_ref_analitico) & (niveis_df["n_plantoes"] >= 1)
+    ].copy()
+    snap_conc["custo_programa_medico"] = snap_conc["custo_aumento_pct_mes"] + snap_conc["custo_rampup_mes"]
+    snap_conc = snap_conc[snap_conc["custo_programa_medico"] > 0].sort_values(
+        "custo_programa_medico", ascending=False
+    )
+    custo_total_conc = float(snap_conc["custo_programa_medico"].sum())
+    top10_conc = snap_conc.head(10).copy()
+    pct_top5 = (
+        top10_conc.head(5)["custo_programa_medico"].sum() / custo_total_conc * 100
+        if custo_total_conc > 0 else 0.0
+    )
+    pct_top10 = (
+        top10_conc["custo_programa_medico"].sum() / custo_total_conc * 100
+        if custo_total_conc > 0 else 0.0
+    )
+
+    # ---- PDF (item 2) - dados já calculados acima, sem duplicar lógica ----
+    indicadores_pdf = {
+        "mes_ref": mes_ref_analitico,
+        "mes_anterior": linha_anterior["anomes"] if linha_anterior is not None else None,
+        "custo_total": linha_atual["custo_total"], "delta_custo_total_pct": delta_custo_total_pct,
+        "pct_custo_repasse": pct_custo_sobre_repasse,
+        "n_bonificados": int(linha_atual["n_bonificados"]), "n_ativos": int(linha_atual["n_ativos"]),
+        "pct_bonificados": pct_bonificados, "ticket_medio": ticket_medio_atual,
+        "delta_ticket_medio_pct": delta_ticket_medio_pct,
+        "custo_medio_bonificado": custo_medio_bonificado,
+    }
+    pdf_analitico = comunicado_pdf.gerar_pdf_analitico(
+        df_mensal.to_dict("records"), indicadores_pdf, mes_ref_analitico,
+        custo_por_operacao=df_operacao.to_dict("records") if not df_operacao.empty else None,
+    )
+    st.download_button(
+        "📄 Baixar PDF do Analítico", data=pdf_analitico,
+        file_name=f"analitico_{mes_ref_analitico}.pdf", mime="application/pdf", type="primary",
+    )
+
+    # ================================================== CUSTO MENSAL DO PROGRAMA
     st.markdown("#### Custo mensal do programa")
     st.caption("Aumento % no repasse (pagamento por nível, imediato/sem carência) + bônus de ramp-up, mês a mês.")
     st.bar_chart(
@@ -1343,25 +1489,32 @@ if pagina == "📈 Analítico":
         use_container_width=True, hide_index=True,
     )
 
+    # ================================================== CUSTO POR OPERAÇÃO/HOSPITAL
+    st.markdown("---")
+    st.markdown(f"#### Custo por operação/hospital — {mes_ref_analitico}")
+    st.caption(
+        "O aumento % é um atributo do médico/nível (calculado sobre o repasse TOTAL dele no mês) "
+        "— aqui é rateado proporcionalmente ao repasse de cada operação, uma ESTIMATIVA de "
+        "concentração, não contabilização exata por hospital. O bônus de ramp-up já é exato "
+        "(a operação vem do próprio disparo)."
+    )
+    if df_operacao.empty:
+        st.info(f"Nenhum plantão válido em {mes_ref_analitico} pra quebrar por operação.")
+    else:
+        st.dataframe(
+            df_operacao.rename(columns={
+                "operacao": "Operação", "custo_aumento_alocado": "Aumento % (alocado)",
+                "custo_rampup": "Bônus ramp-up", "custo_total": "Custo total",
+                "n_medicos": "Médicos",
+            }).style.format({
+                "Aumento % (alocado)": fmt_brl, "Bônus ramp-up": fmt_brl, "Custo total": fmt_brl,
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+    # ================================================== INDICADORES MACRO
     st.markdown("---")
     st.markdown("#### Indicadores macro")
-
-    # Indicadores calculados sobre o "📅 Mês de referência" do sidebar, com delta vs o mês
-    # imediatamente anterior NA TABELA (não necessariamente calendário-anterior, se houver buraco
-    # sem nenhum médico ativo). Se o mês selecionado for futuro/sem médico ativo ainda (agenda
-    # sendo montada), cai pro último mês com dado de verdade, pra não quebrar o cálculo.
-    mes_analitico = st.session_state["mes_atual"]
-    if mes_analitico in df_mensal["anomes"].values:
-        idx_linha_atual = df_mensal.index[df_mensal["anomes"] == mes_analitico][0]
-    else:
-        idx_linha_atual = df_mensal.index[-1]
-    linha_atual = df_mensal.loc[idx_linha_atual]
-    linha_anterior = df_mensal.loc[idx_linha_atual - 1] if idx_linha_atual > 0 else None
-
-    def _delta_pct(atual, anterior):
-        if anterior is None or anterior == 0:
-            return None
-        return f"{((atual - anterior) / anterior) * 100:+.1f}% vs {linha_anterior['anomes']}"
 
     k1, k2, k3, k4, k5 = st.columns(5)
 
@@ -1369,24 +1522,15 @@ if pagina == "📈 Analítico":
     # mostra em detalhe.
     k1.metric(
         f"Custo total — {linha_atual['anomes']}", fmt_brl(linha_atual["custo_total"]),
-        delta=_delta_pct(linha_atual["custo_total"], linha_anterior["custo_total"] if linha_anterior is not None else None),
-        delta_color="off",
+        delta=_delta_texto(delta_custo_total_pct), delta_color="off",
     )
 
     # 2. Custo do programa como % do repasse total do mês - "quanto o programa custa de verdade"
     # em cima do que já seria pago de qualquer forma, não um número absoluto solto.
-    pct_custo_sobre_repasse = (
-        (linha_atual["custo_total"] / linha_atual["valor_repasse"] * 100)
-        if linha_atual["valor_repasse"] > 0 else 0.0
-    )
     k2.metric("Custo do programa / repasse total", f"{pct_custo_sobre_repasse:.1f}%")
 
     # 3. % de médicos bonificados (Nível 2+, por volume/pagamento) sobre os ativos no mês -
     # alcance real do programa.
-    pct_bonificados = (
-        (linha_atual["n_bonificados"] / linha_atual["n_ativos"] * 100)
-        if linha_atual["n_ativos"] > 0 else 0.0
-    )
     k3.metric(
         "Médicos bonificados (N2+)",
         f"{int(linha_atual['n_bonificados'])} de {int(linha_atual['n_ativos'])} ({pct_bonificados:.0f}%)",
@@ -1394,22 +1538,13 @@ if pagina == "📈 Analítico":
 
     # 4. Ticket médio do plantão no mês, com delta vs mês anterior - referência de base independente
     # do programa em si (repasse bruto antes de qualquer aumento de nível).
-    ticket_medio_atual = (
-        linha_atual["valor_repasse"] / linha_atual["n_plantoes"] if linha_atual["n_plantoes"] > 0 else 0.0
-    )
-    ticket_medio_anterior = None
-    if linha_anterior is not None and linha_anterior["n_plantoes"] > 0:
-        ticket_medio_anterior = linha_anterior["valor_repasse"] / linha_anterior["n_plantoes"]
     k4.metric(
         "Ticket médio do plantão", fmt_brl(ticket_medio_atual),
-        delta=_delta_pct(ticket_medio_atual, ticket_medio_anterior), delta_color="off",
+        delta=_delta_texto(delta_ticket_medio_pct), delta_color="off",
     )
 
     # 5. Custo médio por médico bonificado - eficiência do gasto (quanto custa, em média, manter
     # cada médico no Nível 2+ naquele mês).
-    custo_medio_bonificado = (
-        linha_atual["custo_total"] / linha_atual["n_bonificados"] if linha_atual["n_bonificados"] > 0 else 0.0
-    )
     k5.metric("Custo médio / médico bonificado", fmt_brl(custo_medio_bonificado))
 
     st.caption(
@@ -1418,6 +1553,43 @@ if pagina == "📈 Analítico":
         + " \"Bonificado\" = Nível 2+ por volume do próprio mês (nivel_bruto, sem carência — mesmo "
         "critério do pagamento, ver 'Regras do Programa')."
     )
+
+    # ================================================== CONCENTRAÇÃO DE RISCO
+    st.markdown("---")
+    st.markdown("#### 🎯 Concentração de risco")
+    st.caption(
+        "Quanto do custo do programa está concentrado em poucos médicos-chave — quanto maior, "
+        "maior a dependência de poucas pessoas (se um desses médicos sair, o impacto no custo/"
+        "volume do programa é desproporcional)."
+    )
+    if snap_conc.empty:
+        st.info(f"Nenhum médico com custo de programa em {mes_ref_analitico}.")
+    else:
+        rc1, rc2 = st.columns(2)
+        rc1.metric("Top 5 médicos = % do custo do programa", f"{pct_top5:.0f}%")
+        rc2.metric("Top 10 médicos = % do custo do programa", f"{pct_top10:.0f}%")
+
+        especialidades_conc = []
+        for medico_c in top10_conc["medico"]:
+            esp_c = df_linhas.loc[df_linhas["medico"] == medico_c, "especialidade"]
+            esp_c = esp_c[esp_c != ""]
+            moda_c = esp_c.mode()
+            especialidades_conc.append(moda_c.iat[0] if not moda_c.empty else "—")
+        top10_conc["especialidade"] = especialidades_conc
+        top10_conc["pct_do_custo"] = (
+            top10_conc["custo_programa_medico"] / custo_total_conc * 100 if custo_total_conc > 0 else 0.0
+        )
+        st.dataframe(
+            top10_conc[[
+                "medico", "especialidade", "nivel_bruto", "custo_programa_medico", "pct_do_custo",
+            ]].rename(columns={
+                "medico": "Médico", "especialidade": "Especialidade", "nivel_bruto": "Nível",
+                "custo_programa_medico": "Custo do programa (mês)", "pct_do_custo": "% do custo total",
+            }).style.format({
+                "Custo do programa (mês)": fmt_brl, "% do custo total": "{:.1f}%",
+            }),
+            use_container_width=True, hide_index=True,
+        )
 
     st.stop()
 
