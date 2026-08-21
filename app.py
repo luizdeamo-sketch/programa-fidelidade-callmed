@@ -13,6 +13,7 @@ trocar as senhas em usuarios.py e, se for para produção real, migrar para algo
 Lovable já discutida.
 """
 import copy
+import datetime
 import io
 import json
 import pathlib
@@ -521,7 +522,21 @@ if (
     "mes_atual" not in st.session_state
     or st.session_state["mes_atual"] not in meses_disponiveis
 ):
-    st.session_state["mes_atual"] = meses_disponiveis[-1]
+    # "Mais recente que tem dado" NAO e mais o mesmo que "mes atual" desde que o upload passou a
+    # trazer agendamento antecipado (o export do pegaplantao.com.br ja inclui plantoes do mes
+    # seguinte, ainda sendo montados) - achado real 2026-08-21: subir uma planilha de agosto
+    # trazia junto setembro, e o padrao pulava pra setembro (mes futuro, agenda incompleta),
+    # mostrando numeros baixos que pareciam "queda" mas eram so falta de dado ainda. Prioriza o
+    # mes-calendario corrente se ele ja tem dado; senao cai pro ultimo mes que NAO e futuro (ou,
+    # se nem isso existir - base toda no futuro - usa o mais recente mesmo).
+    mes_calendario_hoje = datetime.date.today().strftime("%Y-%m")
+    meses_ate_hoje = [m for m in meses_disponiveis if m <= mes_calendario_hoje]
+    if mes_calendario_hoje in meses_disponiveis:
+        st.session_state["mes_atual"] = mes_calendario_hoje
+    elif meses_ate_hoje:
+        st.session_state["mes_atual"] = meses_ate_hoje[-1]
+    else:
+        st.session_state["mes_atual"] = meses_disponiveis[-1]
 
 
 def _ir_mes(delta):
@@ -1088,8 +1103,18 @@ snap_completo = core.status_atual(niveis_df, anomes_referencia=mes_ref)
 # 0 plantoes no mes (preservados no historico so pra manter a carencia funcionando corretamente
 # entre meses) - esses NAO contam como ativos nem entram nas contagens/tabela abaixo.
 snap = snap_completo[snap_completo["n_plantoes"] >= 1]
-if mes_ref != meses_disponiveis[-1]:
-    st.info(f"Visualizando **{mes_ref}** (histórico) — não é o mês mais recente da base.")
+# Compara com o mes-CALENDARIO corrente, nao com meses_disponiveis[-1] - desde que o upload
+# passou a trazer agendamento antecipado do mes seguinte junto (export pegaplantao.com.br), "mais
+# recente que tem dado" deixou de significar "mes atual" (achado real 2026-08-21). Mes futuro
+# ganha aviso diferente do mes passado - agenda ainda incompleta, nao e "historico" de verdade.
+_mes_calendario_hoje = datetime.date.today().strftime("%Y-%m")
+if mes_ref < _mes_calendario_hoje:
+    st.info(f"Visualizando **{mes_ref}** (histórico) — não é o mês corrente.")
+elif mes_ref > _mes_calendario_hoje:
+    st.info(
+        f"Visualizando **{mes_ref}** (mês futuro) — agenda ainda sendo montada, números "
+        "tendem a crescer conforme mais plantões forem lançados."
+    )
 
 # ---------------------------------------------------------------- VISÃO GERAL
 st.subheader(f"Visão geral — {mes_ref}")
