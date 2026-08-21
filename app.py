@@ -36,11 +36,13 @@ st.set_page_config(page_title="CallMed Premium", page_icon=str(ICONE_CM_AZUL), l
 
 
 @st.cache_data(ttl=3600, show_spinner="Lendo base de plantões (Supabase)...")
-def carregar_linhas_brutas(apoio_json):
+def carregar_linhas_brutas(apoio_json, versao_logica):
     """Le a base de plantoes inteira do Supabase - nao depende mais de acesso a maquina/OneDrive
     (migracao 2026-08-20). Cacheada tambem pelo JSON do mapeamento Apoio (tela '🗂️ Apoio'), entao
     so recalcula de fato quando o master edita uma classificacao ou depois de um novo upload (ver
-    'Fonte de dados', que limpa esse cache)."""
+    'Fonte de dados', que limpa esse cache). 'versao_logica' (core.LOGICA_NEGOCIO_VERSAO) so
+    existe pra forçar cache miss quando enriquecer_plantoes()/consultar_plantoes_supabase()
+    mudam por dentro - ver comentário completo no core.py."""
     if apoio_json and apoio_json != "[]":
         apoio_df = pd.read_json(io.StringIO(apoio_json))
     else:
@@ -59,17 +61,24 @@ def apoio_para_json(apoio_df):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def agregar_com_operacoes(df_linhas, operacoes_excluidas_tuple):
+def agregar_com_operacoes(df_linhas, operacoes_excluidas_tuple, versao_logica):
     """Aplica a lista de operacoes excluidas (tela Operacoes) e agrega. Cacheado pela tupla de
-    operacoes excluidas - so recalcula de fato quando o master muda alguma coisa la."""
+    operacoes excluidas - so recalcula de fato quando o master muda alguma coisa la.
+    'versao_logica' (core.LOGICA_NEGOCIO_VERSAO) so existe pra forçar cache miss quando
+    aplicar_operacoes_customizadas()/agregar_mensal() mudam por dentro."""
     df_ajustado = core.aplicar_operacoes_customizadas(df_linhas, set(operacoes_excluidas_tuple))
     return core.agregar_mensal(df_ajustado)
 
 
 @st.cache_data(ttl=3600, show_spinner="Recalculando níveis com os parâmetros atuais...")
-def calcular_niveis_cached(agg, niveis_json, medicos_gestores_tuple, custo_seguro_total):
-    """Cacheado pelo JSON dos parametros + tupla de gestores manuais + custo do seguro - so
-    recalcula de fato quando algum dos tres muda."""
+def calcular_niveis_cached(agg, niveis_json, medicos_gestores_tuple, custo_seguro_total, versao_calculo):
+    """Cacheado pelo JSON dos parametros + tupla de gestores manuais + custo do seguro + versao
+    do calculo - so recalcula de fato quando algum dos quatro muda. 'versao_calculo' (core.
+    LOGICA_NEGOCIO_VERSAO) nao afeta o resultado em si - existe só pra FORÇAR cache miss quando a
+    lógica interna de core.calcular_niveis() mudar, já que st.cache_data só olha o bytecode da
+    função decorada (essa aqui), não de funções que ela chama por dentro (achado real
+    2026-08-21: um redeploy que só mexeu em core.py deixou o cache antigo vivo, servindo
+    resultado errado sem erro nenhum - ver comentário de LOGICA_NEGOCIO_VERSAO em core.py)."""
     niveis = json.loads(niveis_json)
     return core.calcular_niveis(
         agg, niveis=niveis, medicos_gestores=set(medicos_gestores_tuple),
@@ -501,7 +510,9 @@ if "apoio_custom" not in st.session_state:
     # Le do Supabase (tabela public.apoio) - fonte de verdade desde a migracao 2026-08-20.
     st.session_state["apoio_custom"] = core.consultar_apoio_supabase(_sb)
 
-df_linhas = carregar_linhas_brutas(apoio_para_json(st.session_state["apoio_custom"]))
+df_linhas = carregar_linhas_brutas(
+    apoio_para_json(st.session_state["apoio_custom"]), core.LOGICA_NEGOCIO_VERSAO
+)
 if "operacoes_excluidas" not in st.session_state:
     padrao_operacoes = list(core.operacoes_excluidas_por_padrao(df_linhas))
     st.session_state["operacoes_excluidas"] = set(
@@ -525,11 +536,14 @@ if "rampup_pct" not in st.session_state:
 if "rampup_disparos" not in st.session_state:
     st.session_state["rampup_disparos"] = core.consultar_rampup_supabase(_sb)
 
-agg = agregar_com_operacoes(df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])))
+agg = agregar_com_operacoes(
+    df_linhas, tuple(sorted(st.session_state["operacoes_excluidas"])), core.LOGICA_NEGOCIO_VERSAO
+)
 niveis_df = calcular_niveis_cached(
     agg, niveis_para_json(st.session_state["niveis_custom"]),
     tuple(sorted(st.session_state["medicos_gestores"])),
     st.session_state["custo_seguro_vida_dit_funeral"] + st.session_state["custo_seguro_rcp"],
+    core.LOGICA_NEGOCIO_VERSAO,
 )
 if niveis_df.empty:
     st.error("Base de plantões não encontrada ou vazia. Verifique o caminho em config_caminhos.py.")

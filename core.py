@@ -36,6 +36,18 @@ import config_caminhos as cfg
 
 GO_LIVE = "2026-09"
 
+# Bump SEMPRE que a LOGICA INTERNA de qualquer funcao de negocio deste modulo mudar (calcular_
+# niveis, enriquecer_plantoes, aplicar_operacoes_customizadas, agregar_mensal, etc.) - achado
+# real 2026-08-21: as funcoes cacheadas de app.py (@st.cache_data - carregar_linhas_brutas,
+# agregar_com_operacoes, calcular_niveis_cached) so invalidam o cache quando o BYTECODE da
+# propria funcao DECORADA muda, nao quando uma funcao deste modulo que elas chamam por dentro
+# muda - um redeploy do Streamlit Cloud que so atualiza core.py pode deixar o cache antigo vivo,
+# servindo resultado ERRADO silenciosamente, sem erro nenhum (bug real: o "colchao" contra queda
+# pontual foi pro ar mas o site continuou mostrando o numero de antes por um bom tempo). As 3
+# funcoes cacheadas de app.py recebem esse numero como argumento explicito extra justamente pra
+# forcar cache miss sempre que ele mudar aqui - bump toda vez que mexer na logica interna.
+LOGICA_NEGOCIO_VERSAO = 2  # 2 = colchao contra queda pontual (MESES_TOLERANCIA_QUEDA_BENEFICIOS)
+
 PLACEHOLDERS_MEDICO = {"<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm"}
 GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
 
