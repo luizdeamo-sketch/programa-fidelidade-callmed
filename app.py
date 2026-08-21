@@ -355,11 +355,13 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
                 )
 
         st.markdown("#### Bônus e custos do mês")
-        b1, b2, b3, b4 = st.columns(4)
+        # Custo do seguro removido daqui (pedido do usuário, 2026-08-21: "não faz sentido estar
+        # aqui" - mesma decisão já aplicada na Visão Geral) - quem tem direito ao seguro está na
+        # lista "🛡️ Médicos com direito ao seguro" (Visão Geral), não como valor de custo solto.
+        b1, b2, b3 = st.columns(3)
         b1.metric("Valor dos plantões", fmt_brl(atual_rel["valor_repasse"]))
         b2.metric("Valor do aumento", fmt_brl(atual_rel["custo_aumento_pct_mes"]))
-        b3.metric("Custo do seguro (empresa)", fmt_brl(atual_rel["custo_seguro_mes"]))
-        b4.metric("Total geral", fmt_brl(atual_rel["valor_total_geral"]))
+        b3.metric("Total geral", fmt_brl(atual_rel["valor_total_geral"]))
 
         with st.expander("Ver histórico completo (todos os meses)"):
             st.dataframe(
