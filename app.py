@@ -1402,9 +1402,18 @@ if pagina == "📈 Analítico":
         return None if pct is None else f"{pct:+.1f}% vs {linha_anterior['anomes']}"
 
     # ---- Custo por operação/hospital no mês (item 3) ----
-    df_operacao = core.custo_por_operacao_mes(
-        df_linhas, niveis_df, st.session_state["rampup_disparos"], mes_ref_analitico
-    )
+    # TEMP DEBUG 2026-08-21: try/except só pra contornar a redação de erro do Streamlit Cloud e
+    # ver a mensagem/traceback real - remover assim que a causa do AttributeError em produção for
+    # identificada e corrigida.
+    try:
+        df_operacao = core.custo_por_operacao_mes(
+            df_linhas, niveis_df, st.session_state["rampup_disparos"], mes_ref_analitico
+        )
+    except Exception as _e_debug:
+        import traceback as _tb_debug
+        st.error(f"DEBUG TEMP — {type(_e_debug).__name__}: {_e_debug}")
+        st.code(_tb_debug.format_exc())
+        st.stop()
 
     # ---- Indicadores macro (item 5, já existente) ----
     pct_custo_sobre_repasse = (
