@@ -46,8 +46,14 @@ GO_LIVE = "2026-09"
 # pontual foi pro ar mas o site continuou mostrando o numero de antes por um bom tempo). As 3
 # funcoes cacheadas de app.py recebem esse numero como argumento explicito extra justamente pra
 # forcar cache miss sempre que ele mudar aqui - bump toda vez que mexer na logica interna.
-LOGICA_NEGOCIO_VERSAO = 3  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
+LOGICA_NEGOCIO_VERSAO = 4  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
 # novas, mesmo calculo de antes - ver "risco de queda de beneficio" na pagina Abordagem)
+# 4 = normaliza (.strip()) medico/local/tipo na leitura do Excel ANTES de comparar contra
+# PLACEHOLDERS_MEDICO/TIPOS_NAO_CONTAM_VOLUME/GESTAO_TIPOS - achado real na auditoria de
+# 2026-08-21: ".Duas Estrelas CallMed " (espaço sobrando no fim) nao batia com
+# TIPOS_NAO_CONTAM_VOLUME, contando como plantao de verdade em 73 linhas historicas (sem impacto
+# no mes corrente, ja "lavado" pelas janelas de carencia). So muda leitura de NOVOS uploads - os
+# dados ja existentes no Supabase foram corrigidos direto (UPDATE plantoes SET tipo=trim(tipo)).
 
 PLACEHOLDERS_MEDICO = {"<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm"}
 GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
@@ -295,21 +301,32 @@ def _ler_plantoes_excel_formato_bd(wb):
         especialidade = row[18] if len(row) > 18 else None
         if not isinstance(mes, (int, float)) or not isinstance(ano, (int, float)):
             continue
+        # medico_s ja normalizado (strip) ANTES de comparar contra PLACEHOLDERS_MEDICO - achado
+        # real 2026-08-21 (mesma auditoria que achou o ".Duas Estrelas CallMed " com espaço
+        # sobrando no Tipo): comparar o valor CRU contra um set de string exata deixa passar
+        # despercebido qualquer variante com espaço a mais/a menos, sem erro nenhum pra avisar.
+        medico_s = str(medico).strip() if medico is not None else ""
         if not isinstance(valor, (int, float)) or valor <= 0:
-            if medico and medico not in PLACEHOLDERS_MEDICO:
+            if medico_s and medico_s not in PLACEHOLDERS_MEDICO:
                 # so conta como "descartada" se pelo menos parecia uma linha de verdade (tinha
                 # medico) - uma linha em branco de fato nao e um dado perdido, e ruido da planilha.
                 descartadas_valor_invalido += 1
             continue
-        if not medico or medico in PLACEHOLDERS_MEDICO:
+        if not medico_s or medico_s in PLACEHOLDERS_MEDICO:
             continue
-        local_s = str(local or "")
+        local_s = str(local or "").strip()
         linhas.append({
             "anomes": f"{int(ano)}-{int(mes):02d}",
-            "medico": str(medico).strip(),
+            "medico": medico_s,
             "data_raw": data_raw,
             "local": local_s,
-            "tipo": str(tipo or ""),
+            # .strip() no tipo - achado real na auditoria de 2026-08-21: a planilha tinha
+            # ".Duas Estrelas CallMed " com espaço sobrando no fim, o que fazia o match exato
+            # contra TIPOS_NAO_CONTAM_VOLUME falhar silenciosamente (73 linhas de bônus contando
+            # como plantão de verdade, inflando volume/repasse). Sem impacto no mês corrente na
+            # hora do achado (streaks já tinham "lavado" o efeito), mas corrigido na origem pra
+            # não repetir com qualquer Tipo/Local futuro.
+            "tipo": str(tipo or "").strip(),
             "especialidade_bd": str(especialidade or ""),
             "valor": float(valor),
         })
@@ -366,11 +383,14 @@ def _ler_plantoes_excel_formato_pegaplantao(wb):
         data_raw, local, medico, tipo, valor = (
             row[i_data], row[i_local], row[i_medico], row[i_tipo], row[i_valor]
         )
+        # medico_s normalizado (strip) ANTES do match contra PLACEHOLDERS_MEDICO - mesmo motivo
+        # do reader do formato BD acima (achado real 2026-08-21).
+        medico_s = str(medico).strip() if medico is not None else ""
         if not isinstance(valor, (int, float)) or valor <= 0:
-            if medico and medico not in PLACEHOLDERS_MEDICO:
+            if medico_s and medico_s not in PLACEHOLDERS_MEDICO:
                 descartadas_valor_invalido += 1
             continue
-        if not medico or medico in PLACEHOLDERS_MEDICO:
+        if not medico_s or medico_s in PLACEHOLDERS_MEDICO:
             continue
         # Sem colunas mes/ano separadas nesse formato - deriva da propria Data (mesmo texto
         # "dd/mm/aaaa hh:mm" usado como data_raw, dayfirst=True igual ao resto do sistema).
@@ -379,10 +399,10 @@ def _ler_plantoes_excel_formato_pegaplantao(wb):
             continue
         linhas.append({
             "anomes": f"{data_dt.year}-{data_dt.month:02d}",
-            "medico": str(medico).strip(),
+            "medico": medico_s,
             "data_raw": data_raw,
-            "local": str(local or ""),
-            "tipo": str(tipo or ""),
+            "local": str(local or "").strip(),
+            "tipo": str(tipo or "").strip(),
             "especialidade_bd": "",
             "valor": float(valor),
         })
