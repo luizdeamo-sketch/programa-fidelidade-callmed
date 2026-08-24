@@ -631,8 +631,8 @@ with st.sidebar:
     pagina = st.radio(
         "Navegação",
         ["📊 Visão Geral", "📈 Analítico", "🏥 Operações", "👔 Gestores", "⚙️ Regras do Programa",
-         "📄 Relatório do Médico", "📣 Abordagem (quase lá)", "🗂️ Apoio (Local → Especialidade)",
-         "🗄️ Base de Plantões"],
+         "📄 Relatório do Médico", "📣 Abordagem (quase lá)", "✅ Elegibilidade (novo ciclo)",
+         "💰 Receita sem médico", "🗂️ Apoio (Local → Especialidade)", "🗄️ Base de Plantões"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -1336,6 +1336,121 @@ if pagina == "📣 Abordagem (quase lá)":
             "Se o próximo mês também vier abaixo do mínimo do nível de benefício, a carência "
             "reseta e o médico cai pro nível que o volume realmente sustentar."
         )
+
+    st.stop()
+
+# ============================================================= PÁGINA: ELEGIBILIDADE (NOVO CICLO)
+# Pedido do usuario (2026-08-22): lista SEMPRE ATUALIZADA de quem ja cumpriu carencia e esta com
+# os beneficios extras liberados - pro novo ciclo do CallMed Premium (GO_LIVE). Diferente da lista
+# de seguro (expander na Visao Geral, so N2+ especificamente pra mandar pra seguradora), essa
+# cobre TODOS os niveis de beneficio (N2/N3/N4) agrupados, como pagina propria.
+if pagina == "✅ Elegibilidade (novo ciclo)":
+    st.subheader("✅ Elegibilidade — novo ciclo do CallMed Premium")
+    st.caption(
+        f"Médicos que já cumpriram a carência e estão com os benefícios extras liberados "
+        f"(seguro, cursos, licenças) — prontos pro ciclo que começa em {core.GO_LIVE}. Baseado "
+        "no nível de benefícios (com carência cumprida), não no volume bruto do mês — atualiza "
+        "sozinho a cada novo dado carregado."
+    )
+    mes_eleg = st.session_state["mes_atual"]
+    snap_eleg = core.status_atual(niveis_df, anomes_referencia=mes_eleg)
+    snap_eleg = snap_eleg[snap_eleg["nivel_vestido"] >= 2].copy()
+
+    if snap_eleg.empty:
+        st.info(f"Nenhum médico com benefícios extras liberados em {mes_eleg}.")
+        st.stop()
+
+    snap_eleg["tempo_beneficio_meses"] = snap_eleg.apply(core.tempo_no_nivel_atual, axis=1)
+    especialidades_eleg = []
+    for medico_e in snap_eleg["medico"]:
+        esp_e = df_linhas.loc[df_linhas["medico"] == medico_e, "especialidade"]
+        esp_e = esp_e[esp_e != ""]
+        moda_e = esp_e.mode()
+        especialidades_eleg.append(moda_e.iat[0] if not moda_e.empty else "—")
+    snap_eleg["especialidade"] = especialidades_eleg
+
+    filtro_nivel_eleg = st.multiselect(
+        "Filtrar por nível de benefício", [2, 3, 4], default=[2, 3, 4], key="filtro_eleg",
+    )
+    tabela_eleg = snap_eleg[snap_eleg["nivel_vestido"].isin(filtro_nivel_eleg)]
+    st.markdown(f"#### {len(tabela_eleg)} médico(s) elegível(is) — {mes_eleg}")
+
+    resumos_nivel_eleg = {
+        4: "Tudo do Nível 3 + 100% de reembolso em cursos, licença maternidade/paternidade remunerada, reconhecimento oficial.",
+        3: "Tudo do Nível 2 + 50% de reembolso em cursos, escala preferencial.",
+        2: "Desconto em planos de saúde, antecipação de plantões agendados, mindfulness, e o pacote completo de seguros (Vida, DIT, Funeral, RCP).",
+    }
+    for n in (4, 3, 2):
+        grupo_eleg = tabela_eleg[tabela_eleg["nivel_vestido"] == n]
+        if grupo_eleg.empty:
+            continue
+        with st.expander(f"Nível {n} — {len(grupo_eleg)} médico(s)", expanded=True):
+            st.caption(resumos_nivel_eleg[n])
+            st.dataframe(
+                grupo_eleg[["medico", "especialidade", "tempo_beneficio_meses"]]
+                .sort_values("medico")
+                .rename(columns={
+                    "medico": "Médico", "especialidade": "Especialidade",
+                    "tempo_beneficio_meses": "Meses c/ benefício ativo",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+    st.stop()
+
+# ============================================================= PÁGINA: RECEITA SEM MÉDICO
+# Pedido do usuario (2026-08-22): "Admin CallmedCall" e ".CallMed Adm" sao nomes usados pela
+# propria CallMed pra plantoes sem medico real associado (ausencia ou estrategia da operacao) -
+# a receita fica 100% com a CallMed, sem repasse a pagar pra ninguem. Ja excluidos de TODA
+# contagem do CallMed Premium (ver core.PLACEHOLDERS_MEDICO/enriquecer_plantoes) - essa pagina e
+# so pra visibilidade financeira dessa receita, separada do programa de fidelidade.
+if pagina == "💰 Receita sem médico":
+    st.subheader("💰 Receita sem médico")
+    st.caption(
+        "Plantões lançados sob \"Admin CallmedCall\" e \".CallMed Adm\" — por ausência ou "
+        "estratégia da operação, não têm médico real associado. A receita fica 100% com a "
+        "CallMed, sem repasse a pagar. Essas linhas já são excluídas de toda contagem do "
+        "CallMed Premium (médicos, níveis, plantões) — essa página é só visibilidade financeira, "
+        "não faz parte do programa de fidelidade."
+    )
+    df_receita_sm = core.consultar_receita_sem_medico(supabase_client.get_client())
+    if df_receita_sm.empty:
+        st.info("Nenhum plantão sem médico associado encontrado.")
+        st.stop()
+
+    st.metric("Receita total (histórico)", fmt_brl(df_receita_sm["valor"].sum()))
+
+    st.markdown("#### Por mês")
+    resumo_mensal_sm = df_receita_sm.groupby("anomes")["valor"].sum().reset_index()
+    st.bar_chart(
+        resumo_mensal_sm.set_index("anomes")["valor"].rename("Receita"), use_container_width=True,
+    )
+    st.dataframe(
+        resumo_mensal_sm.rename(columns={"anomes": "Mês", "valor": "Receita"})
+        .style.format({"Receita": fmt_brl}),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown("---")
+    st.markdown("#### Por conta")
+    resumo_conta_sm = df_receita_sm.groupby("medico")["valor"].agg(["count", "sum"]).reset_index()
+    st.dataframe(
+        resumo_conta_sm.rename(columns={"medico": "Conta", "count": "Linhas", "sum": "Receita"})
+        .style.format({"Receita": fmt_brl}),
+        use_container_width=True, hide_index=True,
+    )
+
+    st.markdown("---")
+    st.markdown("#### Por operação/hospital")
+    resumo_op_sm = (
+        df_receita_sm.groupby("operacao")["valor"].agg(["count", "sum"]).reset_index()
+        .sort_values("sum", ascending=False)
+    )
+    st.dataframe(
+        resumo_op_sm.rename(columns={"operacao": "Operação", "count": "Linhas", "sum": "Receita"})
+        .style.format({"Receita": fmt_brl}),
+        use_container_width=True, hide_index=True,
+    )
 
     st.stop()
 

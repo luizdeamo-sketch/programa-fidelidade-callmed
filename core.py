@@ -46,7 +46,7 @@ GO_LIVE = "2026-09"
 # pontual foi pro ar mas o site continuou mostrando o numero de antes por um bom tempo). As 3
 # funcoes cacheadas de app.py recebem esse numero como argumento explicito extra justamente pra
 # forcar cache miss sempre que ele mudar aqui - bump toda vez que mexer na logica interna.
-LOGICA_NEGOCIO_VERSAO = 4  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
+LOGICA_NEGOCIO_VERSAO = 6  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
 # novas, mesmo calculo de antes - ver "risco de queda de beneficio" na pagina Abordagem)
 # 4 = normaliza (.strip()) medico/local/tipo na leitura do Excel ANTES de comparar contra
 # PLACEHOLDERS_MEDICO/TIPOS_NAO_CONTAM_VOLUME/GESTAO_TIPOS - achado real na auditoria de
@@ -54,6 +54,14 @@ LOGICA_NEGOCIO_VERSAO = 4  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcula
 # TIPOS_NAO_CONTAM_VOLUME, contando como plantao de verdade em 73 linhas historicas (sem impacto
 # no mes corrente, ja "lavado" pelas janelas de carencia). So muda leitura de NOVOS uploads - os
 # dados ja existentes no Supabase foram corrigidos direto (UPDATE plantoes SET tipo=trim(tipo)).
+# 5 = Retroativo passa a contar pro streak/carencia dos BENEFICIOS EXTRAS (nivel_vestido), mas
+# nunca pro pagamento (nivel_bruto) - ver TIPOS_APENAS_BENEFICIOS, conta_pro_beneficios,
+# n_plantoes_beneficios/n_fds_ou_noturno_beneficios em agregar_mensal(), e nivel_bruto_beneficios/
+# streaks_pagamento em calcular_niveis() (decisao do usuario 2026-08-22).
+# 6 = enriquecer_plantoes() agora filtra PLACEHOLDERS_MEDICO tambem pro caminho Supabase (nao so
+# upload de Excel) - achado real 2026-08-22, "<Sem Responsável>"/"Admin CallmedCall"/
+# ".CallMed Adm" estavam contando como medico de verdade (migracao inicial trouxe essas linhas
+# sem filtrar), incluindo um "medico fantasma" de Nivel 4 em 2026-08.
 
 PLACEHOLDERS_MEDICO = {"<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm"}
 GESTAO_TIPOS = {"Coordenação", "Gestão", "ASSIST. ADM"}
@@ -73,6 +81,17 @@ TIPOS_NAO_CONTAM_VOLUME = {
     "Antecipação", "Callmed Premium", "Premiação Infiniti",
     ".Quatro Estrelas CallMed", ".Três Estrelas CallMed", ".Duas Estrelas CallMed",
 }
+
+# "Retroativo" - decisao do usuario 2026-08-22: conta SO pro lado dos BENEFICIOS EXTRAS
+# (seguro/cursos/licencas - carencia/nivel_vestido), nunca pro PAGAMENTO (nivel_bruto/valor_
+# repasse/% de aumento). E um tipo intermediario, diferente dos dois grupos ja existentes:
+# nao e "sem volume nenhum" (TIPOS_NAO_CONTAM_VOLUME, que exclui dos dois lados - Antecipacao/
+# Estrelas/Callmed Premium sao pagamento duplicado do MESMO plantao), mas tambem nao e um
+# plantao normal completo (que conta nos dois lados) - representa trabalho de verdade que so
+# entrou tarde/retroativamente no sistema de pagamento, entao credita a favor da continuidade
+# de carencia (justo com o medico) sem inflar o valor pago no mes em que foi lancado (evita
+# pagar % de aumento em cima de um valor que, na pratica, e referente a um mes anterior).
+TIPOS_APENAS_BENEFICIOS = {"Retroativo"}
 
 # Hospitais inteiros fora do escopo do programa (qualquer plantao la, de qualquer tipo)
 EXCLUSAO_HOSPITAL_REGEX = re.compile(r"covas|amhemed", re.IGNORECASE)
@@ -419,6 +438,19 @@ def enriquecer_plantoes(df, apoio_df=None, arquivo=None):
     if df.empty:
         return df
     df = df.copy()
+    # Exclui PLACEHOLDERS_MEDICO ("<Sem Responsável>", "Admin CallmedCall", ".CallMed Adm") -
+    # linhas administrativas/sem responsavel do proprio relatorio de origem, NAO sao medico de
+    # verdade nem gasto do programa (confirmado pelo usuario 2026-08-22). Os leitores de Excel
+    # (_ler_plantoes_excel_formato_*) ja filtram isso ANTES de chegar aqui - mas
+    # consultar_plantoes_supabase() le direto da tabela 'plantoes' sem esse filtro, e a migracao
+    # inicial pro Supabase (2026-08-20) trouxe essas linhas junto sem filtrar: achado real
+    # 2026-08-22, 6.744 linhas no total (2021 a 2026), incluindo 298 linhas de Anestesia so em
+    # 2026-08 (R$504.865,00) - suficiente pra "<Sem Responsável>" aparecer como um medico
+    # fantasma de Nivel 4 nos calculos. Filtrar aqui (na funcao compartilhada pelos dois
+    # caminhos de leitura) cobre upload novo E o que ja esta migrado, de uma vez so.
+    df = df[~df["medico"].astype(str).str.strip().isin(PLACEHOLDERS_MEDICO)].copy()
+    if df.empty:
+        return df
     df["data_dt"] = pd.to_datetime(df["data_raw"], dayfirst=True, errors="coerce")
     # FDS = Sabado e Domingo (sexta NAO conta mais - mudanca de regra confirmada pelo usuario,
     # sessao 2026-08-20, ver Programa_Constelacao_CallMed_v2.md).
@@ -464,14 +496,25 @@ def enriquecer_plantoes(df, apoio_df=None, arquivo=None):
     # Anestesia :: Anestesia" - granularidade real da tela "Operacoes".
     especialidade_disp = df["especialidade"].replace("", "(sem especialidade)")
     df["chave_operacao"] = df["operacao"] + SEP_OP_ESP + especialidade_disp
-    # plantao valido = conta pro volume do nivel: especialidade Anestesia (Apoio), hospital nao
-    # excluido, e nao e pagamento de gestao/coordenacao nem tipo nao-clinico. Este e o padrao
-    # default - a tela "Operacoes" permite substituir esse filtro por uma lista customizada de
-    # chave_operacao via aplicar_operacoes_customizadas(), sem precisar reler o Excel.
-    df["conta_pro_nivel"] = (
+    # "conta_pro_beneficios" = volume que conta pra carencia/nivel de BENEFICIOS EXTRAS (seguro,
+    # cursos, licencas) - especialidade Anestesia (Apoio), hospital nao excluido, nao e pagamento
+    # de gestao/coordenacao, nao e tipo nao-clinico (TIPOS_NAO_CONTAM_VOLUME). Inclui os tipos de
+    # TIPOS_APENAS_BENEFICIOS (hoje so "Retroativo" - decisao do usuario 2026-08-22).
+    #
+    # "conta_pro_nivel" = volume que conta pro PAGAMENTO (nivel_bruto/valor_repasse/% de aumento -
+    # ver calcular_niveis()) - mesma base, mas SEM os tipos de TIPOS_APENAS_BENEFICIOS. E sempre
+    # um subconjunto de conta_pro_beneficios (tudo que conta pro pagamento tambem conta pros
+    # beneficios; a diferenca entre os dois e exatamente o Retroativo).
+    #
+    # Este e o padrao default - a tela "Operacoes" permite substituir esse filtro por uma lista
+    # customizada de chave_operacao via aplicar_operacoes_customizadas(), sem precisar reler o
+    # Excel (recalcula os dois campos la tambem).
+    df["eh_apenas_beneficios"] = df["tipo"].isin(TIPOS_APENAS_BENEFICIOS)
+    df["conta_pro_beneficios"] = (
         df["eh_anestesia"] & (~df["hospital_excluido"]) & (~df["eh_gestao"])
         & (~df["eh_tipo_nao_clinico"])
     )
+    df["conta_pro_nivel"] = df["conta_pro_beneficios"] & (~df["eh_apenas_beneficios"])
     return df
 
 
@@ -520,6 +563,49 @@ def consultar_plantoes_supabase(client, apoio_df=None):
         # datetime64, dayfirst e ignorado nesse caso).
         df_cru["data_raw"] = pd.to_datetime(df_cru["data_raw"], errors="coerce")
     return enriquecer_plantoes(df_cru, apoio_df=apoio_df)
+
+
+# Nomes usados pela propria CallMed pra registrar plantoes SEM medico real associado (por
+# ausencia ou por estrategia da propria operacao) - a receita desses plantoes fica 100% com a
+# CallMed, sem repasse a pagar pra ninguem (confirmado pelo usuario 2026-08-22). Diferente de
+# "<Sem Responsável>" (tambem excluido de tudo via PLACEHOLDERS_MEDICO, mas fora dessa visao de
+# receita especificamente - decisao do usuario: "so desses dois nome").
+NOMES_RECEITA_SEM_MEDICO = {"Admin CallmedCall", ".CallMed Adm"}
+
+
+def consultar_receita_sem_medico(client):
+    """Le da tabela public.plantoes as linhas com medico em NOMES_RECEITA_SEM_MEDICO - plantoes
+    sem medico real associado, cuja receita fica integralmente com a CallMed (sem repasse a
+    pagar). Visao de "receita limpa", separada do programa CallMed Premium (essas linhas ja sao
+    excluidas de todo o resto via PLACEHOLDERS_MEDICO/enriquecer_plantoes - nao aparecem em
+    nenhuma contagem de medico/nivel/plantao do programa). Pedido do usuario 2026-08-22."""
+    colunas = ["anomes", "medico", "data_raw", "local", "tipo", "valor"]
+    linhas = []
+    offset = 0
+    while True:
+        resposta = (
+            client.table("plantoes")
+            .select(",".join(colunas))
+            .in_("medico", list(NOMES_RECEITA_SEM_MEDICO))
+            .order("id")
+            .range(offset, offset + _PAGINA_SUPABASE - 1)
+            .execute()
+        )
+        pagina = resposta.data
+        if not pagina:
+            break
+        linhas.extend(pagina)
+        if len(pagina) < _PAGINA_SUPABASE:
+            break
+        offset += _PAGINA_SUPABASE
+    df = pd.DataFrame(linhas, columns=colunas)
+    if df.empty:
+        df["operacao"] = pd.Series(dtype="object")
+        return df
+    df["valor"] = df["valor"].astype(float)
+    df["data_raw"] = pd.to_datetime(df["data_raw"], errors="coerce")
+    df["operacao"] = df["local"].apply(operacao_de)
+    return df
 
 
 def consultar_apoio_supabase(client):
@@ -757,20 +843,23 @@ def operacoes_excluidas_por_padrao(df):
 
 
 def aplicar_operacoes_customizadas(df, operacoes_excluidas):
-    """Recalcula conta_pro_nivel usando um conjunto customizado de chaves (operacao+especialidade)
-    excluidas (tela de Configuracoes > Operacoes) em vez do filtro fixo (so Anestesia, fora
-    EXCLUSAO_HOSPITAL_REGEX). Granularidade agora e por combinacao especifica, entao o master pode
-    liberar uma especialidade fora de Anestesia se quiser (ela so nao aparece pre-marcada por
-    padrao). Sempre exclui eh_gestao (coordenacao/gestao) e eh_tipo_nao_clinico (bonus/premiacao/
-    adiantamento - ver TIPOS_NAO_CONTAM_VOLUME) independente da tela de Operacoes, porque esses
-    dois nao sao sobre ESCOPO de hospital/especialidade e sim sobre o que conta como plantao de
-    verdade. Nao mexe no Excel, so reprocessa o dataframe ja carregado."""
+    """Recalcula conta_pro_nivel/conta_pro_beneficios usando um conjunto customizado de chaves
+    (operacao+especialidade) excluidas (tela de Configuracoes > Operacoes) em vez do filtro fixo
+    (so Anestesia, fora EXCLUSAO_HOSPITAL_REGEX). Granularidade agora e por combinacao especifica,
+    entao o master pode liberar uma especialidade fora de Anestesia se quiser (ela so nao aparece
+    pre-marcada por padrao). Sempre exclui eh_gestao (coordenacao/gestao) e eh_tipo_nao_clinico
+    (bonus/premiacao/adiantamento - ver TIPOS_NAO_CONTAM_VOLUME) independente da tela de
+    Operacoes, porque esses dois nao sao sobre ESCOPO de hospital/especialidade e sim sobre o que
+    conta como plantao de verdade. conta_pro_nivel continua sendo conta_pro_beneficios MENOS
+    eh_apenas_beneficios (Retroativo - ver enriquecer_plantoes()), mesmo raciocinio de la. Nao mexe
+    no Excel, so reprocessa o dataframe ja carregado."""
     df = df.copy()
     operacoes_excluidas = set(operacoes_excluidas or [])
     df["chave_excluida"] = df["chave_operacao"].isin(operacoes_excluidas)
-    df["conta_pro_nivel"] = (
+    df["conta_pro_beneficios"] = (
         (~df["chave_excluida"]) & (~df["eh_gestao"]) & (~df["eh_tipo_nao_clinico"])
     )
+    df["conta_pro_nivel"] = df["conta_pro_beneficios"] & (~df["eh_apenas_beneficios"])
     return df
 
 
@@ -778,8 +867,15 @@ def agregar_mensal(df):
     """Agrega linha-a-linha em (medico, anomes) -> n_plantoes validos, n_fds (Sab/Dom) validos,
     n_noturno validos, n_fds_ou_noturno (uniao, base da exigencia de nivel), se teve pagamento de
     coordenacao/gestao naquele mes (mesmo fora do escopo de hospital - coordenacao e coordenacao
-    em qualquer lugar), e valor de repasse elegivel (base pro % de aumento)."""
+    em qualquer lugar), e valor de repasse elegivel (base pro % de aumento) - tudo isso a partir
+    de conta_pro_nivel, ou seja, do lado do PAGAMENTO.
+
+    Tambem agrega n_plantoes_beneficios/n_fds_ou_noturno_beneficios a partir de
+    conta_pro_beneficios (superset que inclui TIPOS_APENAS_BENEFICIOS, hoje so "Retroativo") -
+    usado exclusivamente por calcular_niveis() pra alimentar o streak de carencia/nivel_vestido,
+    nunca pro pagamento (ver core.py, docstring de TIPOS_APENAS_BENEFICIOS)."""
     colunas_vazias = ["medico", "anomes", "n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno",
+                       "n_plantoes_beneficios", "n_fds_ou_noturno_beneficios",
                        "teve_coordenacao", "valor_repasse"]
     if df.empty:
         return pd.DataFrame(columns=colunas_vazias)
@@ -791,10 +887,19 @@ def agregar_mensal(df):
         n_fds_ou_noturno=("eh_fds_ou_noturno", "sum"),
         valor_repasse=("valor", "sum"),
     ).reset_index()
+
+    validos_beneficios = df[df["conta_pro_beneficios"]]
+    agg_beneficios = validos_beneficios.groupby(["medico", "anomes"]).agg(
+        n_plantoes_beneficios=("valor", "count"),
+        n_fds_ou_noturno_beneficios=("eh_fds_ou_noturno", "sum"),
+    ).reset_index()
+    agg = agg.merge(agg_beneficios, on=["medico", "anomes"], how="outer")
+
     coord = df[df["eh_gestao"]].groupby(["medico", "anomes"]).size().reset_index(name="_n_coord")
     agg = agg.merge(coord, on=["medico", "anomes"], how="outer")
     # medicos que so tem linha de coordenacao (sem plantao clinico contavel no mes) tambem entram
-    for col in ("n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno"):
+    for col in ("n_plantoes", "n_fds", "n_noturno", "n_fds_ou_noturno",
+                "n_plantoes_beneficios", "n_fds_ou_noturno_beneficios"):
         agg[col] = agg[col].fillna(0).astype(int)
     agg["valor_repasse"] = agg["valor_repasse"].fillna(0.0)
     agg["teve_coordenacao"] = agg["_n_coord"].fillna(0) > 0
@@ -820,6 +925,12 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
     custos do mes. Meses sem nenhuma linha pro medico dentro da janela viram 0 plantoes (nao
     "sai" do historico, mas conta como mes fraco pra carencia dos BENEFICIOS - ver "colchao"
     abaixo).
+
+    'agg' tem duas colunas de volume paralelas (ver agregar_mensal()): n_plantoes/n_fds_ou_
+    noturno (pagamento, de conta_pro_nivel) e n_plantoes_beneficios/n_fds_ou_noturno_beneficios
+    (carencia/beneficios, de conta_pro_beneficios - inclui TIPOS_APENAS_BENEFICIOS, hoje so
+    "Retroativo", decisao do usuario 2026-08-22). nivel_bruto usa a primeira (pagamento, sem
+    Retroativo); o streak que alimenta nivel_vestido usa a segunda (beneficios, com Retroativo).
 
     "Colchao" contra queda pontual (pedido do usuario, 2026-08-20): um UNICO mes abaixo do
     volume minimo (ex.: ferias, licenca, imprevisto) NAO reseta a carencia acumulada dos
@@ -865,8 +976,17 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
         grp = grp.set_index("anomes")
         primeiro_idx = min(mes_para_indice[m] for m in grp.index)
         ultimo_idx = mes_para_indice[meses_todos[-1]]  # roda ate o fim da base pra todo mundo
+        # streaks/meses_abaixo_seguidos = lado dos BENEFICIOS EXTRAS (carencia/nivel_vestido) -
+        # construidos a partir de nivel_bruto_beneficios (inclui Retroativo - ver
+        # TIPOS_APENAS_BENEFICIOS). streaks_pagamento/meses_abaixo_pagamento = mesmo mecanismo
+        # (mesma tolerancia do colchao), mas do lado do PAGAMENTO (nivel_bruto, sem Retroativo) -
+        # existe SO pra alimentar "streak_nivel_bruto" (tempo no nivel atual de pagamento, exibido
+        # nas telas) sem misturar com o Retroativo, que so vale pros beneficios (decisao do
+        # usuario 2026-08-22).
         streaks = {2: 0, 3: 0, 4: 0}
         meses_abaixo_seguidos = {2: 0, 3: 0, 4: 0}  # "colchao" - ver docstring da funcao
+        streaks_pagamento = {2: 0, 3: 0, 4: 0}
+        meses_abaixo_pagamento = {2: 0, 3: 0, 4: 0}
         for i in range(primeiro_idx, ultimo_idx + 1):
             am = meses_todos[i]
             if am in grp.index:
@@ -874,10 +994,13 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 n_plantoes = int(row["n_plantoes"])
                 n_fds, n_noturno = int(row["n_fds"]), int(row["n_noturno"])
                 n_fds_ou_noturno = int(row["n_fds_ou_noturno"])
+                n_plantoes_beneficios = int(row.get("n_plantoes_beneficios", 0))
+                n_fds_ou_noturno_beneficios = int(row.get("n_fds_ou_noturno_beneficios", 0))
                 teve_coord = bool(row["teve_coordenacao"])
                 valor_repasse = float(row["valor_repasse"])
             else:
                 n_plantoes, n_fds, n_noturno, n_fds_ou_noturno = 0, 0, 0, 0
+                n_plantoes_beneficios, n_fds_ou_noturno_beneficios = 0, 0
                 teve_coord, valor_repasse = False, 0.0
 
             # exigencia de nivel (min_fds) conta sobre a UNIAO fds+noturno, nao so fds puro.
@@ -887,9 +1010,16 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 niveis[-1]["idx"] if (teve_coord or eh_gestor_manual)
                 else _nivel_bruto(n_plantoes, n_fds_ou_noturno, niveis)
             )
+            # nivel_bruto_beneficios - mesmo raciocinio, mas com o volume "pro beneficios"
+            # (n_plantoes_beneficios/n_fds_ou_noturno_beneficios, que inclui Retroativo) - so
+            # alimenta o streak de carencia/nivel_vestido logo abaixo, nunca o pagamento.
+            nivel_bruto_beneficios = (
+                niveis[-1]["idx"] if (teve_coord or eh_gestor_manual)
+                else _nivel_bruto(n_plantoes_beneficios, n_fds_ou_noturno_beneficios, niveis)
+            )
 
             for nivel_check in (2, 3, 4):
-                if nivel_bruto >= nivel_check:
+                if nivel_bruto_beneficios >= nivel_check:
                     streaks[nivel_check] += 1
                     meses_abaixo_seguidos[nivel_check] = 0
                 else:
@@ -898,6 +1028,14 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                         streaks[nivel_check] = 0
                     # dentro da tolerancia (1º mes abaixo, por padrao): streak fica CONGELADO,
                     # nem avanca nem reseta - "colchao" contra deslize pontual.
+
+                if nivel_bruto >= nivel_check:
+                    streaks_pagamento[nivel_check] += 1
+                    meses_abaixo_pagamento[nivel_check] = 0
+                else:
+                    meses_abaixo_pagamento[nivel_check] += 1
+                    if meses_abaixo_pagamento[nivel_check] > MESES_TOLERANCIA_QUEDA_BENEFICIOS:
+                        streaks_pagamento[nivel_check] = 0
 
             nivel_vestido = 1
             for nivel_check in (2, 3, 4):
@@ -923,8 +1061,9 @@ def calcular_niveis(agg, niveis=None, medicos_gestores=None, custo_seguro_mes=No
                 # streak_nivel_bruto = meses consecutivos que o volume sustenta PELO MENOS o
                 # nivel_bruto atual (None no Nivel 1, que e o piso e nao tem streak) - usado como
                 # "tempo no nivel atual" de PAGAMENTO (sem desconto de carencia, diferente de
-                # tempo_no_nivel_atual() abaixo, que e sobre o nivel_vestido/beneficios).
-                "streak_nivel_bruto": streaks[nivel_bruto] if nivel_bruto >= 2 else None,
+                # tempo_no_nivel_atual() abaixo, que e sobre o nivel_vestido/beneficios). Le do
+                # streaks_pagamento (sem Retroativo), nao do streaks de beneficios.
+                "streak_nivel_bruto": streaks_pagamento[nivel_bruto] if nivel_bruto >= 2 else None,
                 "streak_n2": streaks[2], "streak_n3": streaks[3], "streak_n4": streaks[4],
                 # meses_abaixo_n{X} = quantos meses SEGUIDOS o volume já ficou abaixo do nível X,
                 # dentro da janela de tolerância do colchão (nunca passa de
