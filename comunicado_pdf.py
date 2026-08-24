@@ -38,6 +38,19 @@ def _fmt_brl(v):
     return f"R$ {v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 
+def _fmt_tempo_casa(n_meses):
+    """Mesmo formato de app.py:fmt_tempo_casa() - 'X anos e Y meses' em vez de meses crus
+    (pedido do usuário 2026-08-22). Duplicado aqui de propósito (mesmo padrão de _fmt_brl acima),
+    pra não criar dependência entre os dois módulos só por causa de um helper pequeno."""
+    anos, meses = divmod(int(n_meses), 12)
+    partes = []
+    if anos > 0:
+        partes.append(f"{anos} ano" + ("s" if anos != 1 else ""))
+    if meses > 0 or anos == 0:
+        partes.append(f"{meses} mês" + ("es" if meses != 1 else ""))
+    return " e ".join(partes)
+
+
 def _gerar_grafico_historico(historico_mensal):
     """Grafico de barras (plantoes) + linha (valor recebido) por mes, em memoria (PNG). Cor
     combinando com o badge de nivel (roxo/laranja) - so pra reforcar engajamento, o usuario
@@ -74,7 +87,8 @@ def gerar_pdf_comunicado(
     nome_medico, mes_ref, nivel_pagamento, n_plantoes, n_fds, n_noturno, pct_aumento_exibido,
     plantoes_detalhe, valor_total_plantoes, valor_bonificacao,
     nivel_beneficios=None, especialidade=None,
-    tempo_no_nivel=None, proximo_nivel_info=None, tempo_de_casa=None, historico_mensal=None,
+    tempo_no_nivel=None, proximo_nivel_info=None, tempo_de_casa=None, primeiro_mes=None,
+    historico_mensal=None,
 ):
     """Monta o PDF em memória e retorna os bytes prontos pra um st.download_button.
 
@@ -160,7 +174,10 @@ def gerar_pdf_comunicado(
     if tempo_no_nivel is not None:
         linhas_tabela.append(["Tempo no nível atual", f"{int(tempo_no_nivel)} mês(es)"])
     if tempo_de_casa is not None:
-        linhas_tabela.append(["Tempo com a CallMed", f"{int(tempo_de_casa)} mês(es)"])
+        texto_tempo_casa = _fmt_tempo_casa(tempo_de_casa)
+        if primeiro_mes:
+            texto_tempo_casa += f" (desde {primeiro_mes})"
+        linhas_tabela.append(["Tempo com a CallMed", texto_tempo_casa])
     tabela = Table(linhas_tabela, colWidths=[10 * cm, 5.4 * cm])
     tabela.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 10.5),

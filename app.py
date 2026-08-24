@@ -103,6 +103,19 @@ def fmt_brl_md(v):
     return fmt_brl(v).replace("$", "\\$")
 
 
+def fmt_tempo_casa(n_meses):
+    """Formata um total de meses como 'X anos e Y meses' (singular/plural corretos, omite a
+    parte zerada) - pedido do usuário 2026-08-22: "tempo de casa" em meses crus (ex.: '68
+    mês(es)') não dava noção real de tempo - agora vira '5 anos e 8 meses'."""
+    anos, meses = divmod(int(n_meses), 12)
+    partes = []
+    if anos > 0:
+        partes.append(f"{anos} ano" + ("s" if anos != 1 else ""))
+    if meses > 0 or anos == 0:
+        partes.append(f"{meses} mês" + ("es" if meses != 1 else ""))
+    return " e ".join(partes)
+
+
 def badge_nivel(n):
     cores = {1: "#9CA3AF", 2: "#60A5FA", 3: "#A78BFA", 4: "#FBBF24"}
     return f'<span style="background:{cores.get(n,"#999")};color:#111;padding:2px 10px;border-radius:12px;font-weight:600;">Nível {n}</span>'
@@ -273,7 +286,8 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             f"**Nível vigente (pagamento)**<br>{badge_nivel(nivel_pagamento_rel)}",
             unsafe_allow_html=True,
         )
-        m2.metric("Tempo de casa", f"{tempo_de_casa_rel} mês(es)", help=f"Desde {primeiro_mes_rel}")
+        m2.metric("Tempo de casa", fmt_tempo_casa(tempo_de_casa_rel))
+        m2.caption(f"Desde {primeiro_mes_rel} (1º plantão)")
         m3.metric(
             "Tempo no nível atual",
             f"{tempo_nivel_pagamento_rel} mês(es)" if tempo_nivel_pagamento_rel is not None else "—",
@@ -405,7 +419,8 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             "Tempo no nível",
             f"{tempo_nivel_pagamento_rel} mês(es)" if tempo_nivel_pagamento_rel is not None else "—",
         )
-        c4.metric("Tempo com a CallMed", f"{tempo_de_casa_rel} mês(es)")
+        c4.metric("Tempo com a CallMed", fmt_tempo_casa(tempo_de_casa_rel))
+        c4.caption(f"Desde {primeiro_mes_rel}")
 
         st.markdown("##### Benefícios inclusos")
         for beneficio in core.beneficios_acumulados(nivel_beneficios_rel):
@@ -463,7 +478,8 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             plantoes_detalhe=plantoes_detalhe_rel, valor_total_plantoes=atual_rel["valor_repasse"],
             valor_bonificacao=atual_rel["custo_aumento_pct_mes"],
             tempo_no_nivel=tempo_nivel_pagamento_rel, proximo_nivel_info=prox_info_rel,
-            tempo_de_casa=tempo_de_casa_rel, historico_mensal=historico_mensal_rel,
+            tempo_de_casa=tempo_de_casa_rel, primeiro_mes=primeiro_mes_rel,
+            historico_mensal=historico_mensal_rel,
         )
         st.download_button(
             "📄 Baixar PDF para o médico", data=pdf_bytes_rel,
@@ -1897,7 +1913,8 @@ if nome:
     )
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.markdown(f"**Nível vigente**<br>{badge_nivel(nivel_pagamento_c)}", unsafe_allow_html=True)
-    m2.metric("Tempo de casa", f"{len(hist)} mês(es)", help=f"Desde {hist['anomes'].min()}")
+    m2.metric("Tempo de casa", fmt_tempo_casa(len(hist)))
+    m2.caption(f"Desde {hist['anomes'].min()} (1º plantão)")
     m3.metric(
         "Tempo no nível atual",
         f"{tempo_nivel_c} mês(es)" if tempo_nivel_c is not None else "—",
