@@ -112,7 +112,7 @@ def fmt_tempo_casa(n_meses):
     if anos > 0:
         partes.append(f"{anos} ano" + ("s" if anos != 1 else ""))
     if meses > 0 or anos == 0:
-        partes.append(f"{meses} mês" + ("es" if meses != 1 else ""))
+        partes.append(f"{meses} mês" if meses == 1 else f"{meses} meses")
     return " e ".join(partes)
 
 
