@@ -46,7 +46,10 @@ GO_LIVE = "2026-09"
 # pontual foi pro ar mas o site continuou mostrando o numero de antes por um bom tempo). As 3
 # funcoes cacheadas de app.py recebem esse numero como argumento explicito extra justamente pra
 # forcar cache miss sempre que ele mudar aqui - bump toda vez que mexer na logica interna.
-LOGICA_NEGOCIO_VERSAO = 6  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
+LOGICA_NEGOCIO_VERSAO = 7  # 3 = expoe meses_abaixo_n2/n3/n4 na saida de calcular_niveis (colunas
+# 7 = enriquecer_plantoes() ganha conta_pro_nivel_novo/conta_pro_beneficios_novo (escopo do
+# PROGRAMA NOVO, Regiao 1+2 - ver bloco acima) - forca cache miss em carregar_linhas_brutas()
+# pra essas colunas novas existirem de verdade na base cacheada, nao só em runs futuros.
 # novas, mesmo calculo de antes - ver "risco de queda de beneficio" na pagina Abordagem)
 # 4 = normaliza (.strip()) medico/local/tipo na leitura do Excel ANTES de comparar contra
 # PLACEHOLDERS_MEDICO/TIPOS_NAO_CONTAM_VOLUME/GESTAO_TIPOS - achado real na auditoria de
