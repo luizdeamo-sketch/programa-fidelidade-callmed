@@ -235,13 +235,33 @@ BENEFICIOS_SEMPRE = [
     "Apoio jurídico integral (preventivo/administrativo)",
     "Academia, nutricionista e psicologia — TotalPass",
 ]
+# Curso ACLS (Advanced Cardiovascular Life Support) - pedido do usuario 2026-09-22: "quero colocar
+# o custo do curso de ACLS, de 1500 valor por pessoa, ainda dentro do programa a CallMed vai trazer
+# isso com desconto de acordo com o nivel de cada [medico]". Valor cheio do curso R$1.500/pessoa;
+# CallMed subsidia o % de desconto do nivel (mesma escala 20/40/60/80 ja aprovada na planilha,
+# aba "Benefícios Não-Financeiros"), o medico paga o resto. 1x/ano por medico (nao e um custo
+# mensal recorrente como seguro/TotalPass) - ver custo_curso_acls_subsidio_ano em
+# calcular_niveis_escalonado() abaixo.
+CUSTO_CURSO_ACLS = 1500.0
+DESCONTO_CURSO_NIVEL = {2: 0.20, 3: 0.40, 4: 0.60, 5: 0.80}
+
+
+def _texto_curso_acls(nivel_idx):
+    pct = DESCONTO_CURSO_NIVEL.get(nivel_idx, 0.0)
+    subsidio = pct * CUSTO_CURSO_ACLS
+    return (
+        f"Curso ACLS — desconto de {pct * 100:.0f}% (CallMed paga {subsidio:.0f} de "
+        f"{CUSTO_CURSO_ACLS:.0f}, 1x/ano)"
+    )
+
+
 BENEFICIOS_ESCALONADO_NIVEL = {
     2: ["Convênio médico", "Seguro de vida — R$100.000", "Seguro RC — R$100.000",
-        "DIT — R$167/dia", "Assistência funeral — R$10.000", "Desconto de 20% em 1 curso/ano"],
-    3: ["Escala preferencial em unidades", "Desconto de 40% em 1 curso/ano"],
-    4: ["Desconto de 60% em 1 curso/ano"],
+        "DIT — R$167/dia", "Assistência funeral — R$10.000", _texto_curso_acls(2)],
+    3: ["Escala preferencial em unidades", _texto_curso_acls(3)],
+    4: [_texto_curso_acls(4)],
     5: ["Seguro de vida — R$200.000 (dobrado)", "Seguro RC — R$200.000 (dobrado)",
-        "DIT — R$334/dia (dobrado)", "Desconto de 80% em 1 curso/ano"],
+        "DIT — R$334/dia (dobrado)", _texto_curso_acls(5)],
 }
 # Custos reais dos beneficios (aba "Custo Benefícios - Set2026", DADO REAL passado pelo usuário):
 # Seguro RC R$100/médico/mês (N2-N4) ou R$200 (N5); Seguro de vida+DIT+funeral R$180/médico/mês
@@ -326,6 +346,11 @@ def calcular_niveis_escalonado(agg, niveis=None):
             pacote_total_mes = valor_repasse + premio_mes
             custo_seguro_rc = CUSTO_SEGURO_RC_ESCALONADO.get(nivel_vestido, 0.0)
             custo_seguro_vida = CUSTO_SEGURO_VIDA_ESCALONADO.get(nivel_vestido, 0.0)
+            # Curso ACLS - direito ANUAL (1x/ano), nao mensal como seguro/TotalPass acima; o
+            # campo abaixo e "quanto a CallMed subsidiaria se o medico usasse o curso este
+            # ano nesse nivel", nao um custo recorrente por mes.
+            desconto_curso_pct = DESCONTO_CURSO_NIVEL.get(nivel_vestido, 0.0)
+            custo_curso_acls_subsidio_ano = desconto_curso_pct * CUSTO_CURSO_ACLS
 
             resultados.append({
                 "medico": medico, "anomes": am,
@@ -342,6 +367,8 @@ def calcular_niveis_escalonado(agg, niveis=None):
                     + [b for nv in idxs if nv <= nivel_vestido for b in BENEFICIOS_ESCALONADO_NIVEL.get(nv, [])]
                 ),
                 "custo_seguro_rc_mes": custo_seguro_rc, "custo_seguro_vida_mes": custo_seguro_vida,
+            "desconto_curso_pct": desconto_curso_pct,
+                "custo_curso_acls_subsidio_ano": custo_curso_acls_subsidio_ano,
             })
     return pd.DataFrame(resultados)
 
