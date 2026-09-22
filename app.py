@@ -90,6 +90,27 @@ def niveis_para_json(niveis):
     return json.dumps(niveis, sort_keys=True)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def montar_niveis_escalonado_cached(df_linhas, versao_logica):
+    """PROGRAMA NOVO (Cenário Escalonado com Gatilho, Região 1+2, vigente a partir de
+    core.GO_LIVE_ESCALONADO) - mesma base df_linhas de sempre (1 sistema único, 1 fonte de dados:
+    o BD de Plantões Médicos), só filtra qual subconjunto de linhas entra aqui (região+mês) e usa
+    as colunas conta_pro_nivel_novo/conta_pro_beneficios_novo (escopo próprio, sem a exclusão de
+    hospital do programa antigo - ver core.enriquecer_plantoes()). Ainda não é customizável pela
+    tela (região/gatilho não têm editor próprio hoje, diferente de niveis_custom do programa
+    antigo) - por isso não precisa de parâmetro de config na chave de cache, só a versão da
+    lógica (mesmo motivo de todo cache aqui: forçar miss quando core.py muda por dentro)."""
+    if df_linhas.empty:
+        return pd.DataFrame()
+    df = df_linhas.copy()
+    df["regiao"] = df["operacao"].map(core.REGIAO_SETOR)
+    eh_novo = df["regiao"].isin(core.REGIOES_ESCALONADO) & (df["anomes"] >= core.GO_LIVE_ESCALONADO)
+    agg_novo = core.agregar_mensal(
+        df[eh_novo], col_nivel="conta_pro_nivel_novo", col_beneficios="conta_pro_beneficios_novo"
+    )
+    return core.calcular_niveis_escalonado(agg_novo)
+
+
 def fmt_brl(v):
     return f"R$ {v:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
@@ -156,6 +177,61 @@ def texto_pagamento_vs_beneficios(nivel_pagamento, nivel_beneficios, pct_exibido
     )
 
 
+def renderizar_bloco_escalonado(nome_medico, mes_referencia):
+    """Bloco 'Programa Novo — Região 1+2' (Cenário Escalonado com Gatilho), anexado ao final de
+    renderizar_relatorio_medico() - sistema único, pedido do usuário 2026-09-22 ("eu queria um
+    sistema único... a base de análise é o BD de plantões médicos, tudo parte dali"): em vez de
+    uma página/app separado, o MESMO relatório do médico mostra este bloco A MAIS quando ele tem
+    histórico no programa novo (Região 1+2, a partir de core.GO_LIVE_ESCALONADO), sem interferir
+    em nada do bloco do programa antigo acima. Silencioso (não desenha nada) se o médico nunca
+    teve plantão em Região 1+2 dentro da janela do programa novo - não vira ruído pra quem só
+    trabalha em Região 3/4/5."""
+    hist_esc = niveis_escalonado_df[niveis_escalonado_df["medico"] == nome_medico].sort_values("anomes") \
+        if not niveis_escalonado_df.empty else niveis_escalonado_df
+    if hist_esc.empty:
+        return
+    disponiveis_ate_mes = hist_esc[hist_esc["anomes"] <= mes_referencia]
+    if disponiveis_ate_mes.empty:
+        return  # medico so passa a ter Regiao 1+2 depois do mes_referencia - nada a mostrar ainda
+    atual_esc = (
+        hist_esc[hist_esc["anomes"] == mes_referencia].iloc[0]
+        if mes_referencia in hist_esc["anomes"].values else disponiveis_ate_mes.iloc[-1]
+    )
+    st.markdown("---")
+    st.markdown("### 🆕 Programa Novo — Região 1+2 (Cenário Escalonado com Gatilho)")
+    st.caption(
+        f"Vigente a partir de {core.GO_LIVE_ESCALONADO} pras operações de Região 1 (ABC) e "
+        "Região 2 (SP Capital) — taxa fixa por plantão (não percentual), com gatilho duplo: "
+        "precisa bater a quantidade de plantões E o mínimo de noturno/FDS no mesmo mês."
+    )
+    if atual_esc["anomes"] != mes_referencia:
+        st.info(
+            f"Sem plantão em Região 1+2 lançado em {mes_referencia} pra esse médico — mostrando o "
+            f"último mês disponível ({atual_esc['anomes']})."
+        )
+    nivel_pag_esc = int(atual_esc["nivel_bruto"])
+    nivel_ben_esc = int(atual_esc["nivel_vestido"])
+    info_pag_esc = core.NIVEL_ESCALONADO_POR_IDX[nivel_pag_esc]
+    e1, e2, e3, e4 = st.columns(4)
+    e1.markdown(f"**Nível (pagamento)**<br>{badge_nivel(nivel_pag_esc)}", unsafe_allow_html=True)
+    e2.metric("Plantões no mês", int(atual_esc["n_plantoes"]))
+    e3.metric("FDS + Noturno", int(atual_esc["n_fds_ou_noturno"]))
+    e4.metric("Taxa/plantão", fmt_brl(info_pag_esc["taxa"]))
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Valor real dos plantões", fmt_brl(atual_esc["valor_repasse"]))
+    p2.metric("Prêmio do mês (delta)", fmt_brl(atual_esc["premio_mes"]))
+    p3.metric("Pacote total", fmt_brl(atual_esc["pacote_total_mes"]))
+    if nivel_pag_esc != nivel_ben_esc:
+        st.info(
+            f"Pagamento já no **Nível {nivel_pag_esc}** (vale na hora, sem carência). Os "
+            f"**benefícios não financeiros** desse nível ainda dependem de "
+            f"{core.NIVEIS_ESCALONADO[nivel_pag_esc - 1]['carencia_meses']} mês(es) consecutivos — "
+            f"hoje os benefícios ativos são os do **Nível {nivel_ben_esc}**."
+        )
+    st.markdown(f"**Benefícios não financeiros ativos (Nível {nivel_ben_esc}):**")
+    st.caption(" · ".join(atual_esc["beneficios_ativos"]))
+
+
 def renderizar_simulacao_niveis(row):
     """Bloco 'Simulação — quanto falta pra cada nível acima' (pedido do usuário 2026-08-20,
     depois pedido de novo pra aparecer também ao selecionar o médico na Tabela de médicos da
@@ -200,7 +276,21 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
     já estão montados no momento em que essa função é chamada (depois do login/carregamento)."""
     hist_rel = niveis_df[niveis_df["medico"] == nome_medico].sort_values("anomes")
     if hist_rel.empty:
-        st.warning("Sem histórico pra esse médico.")
+        # Sem histórico no programa ANTIGO - pode ainda ter no programa NOVO (Região 1+2, ex.:
+        # médico que só começou a trabalhar lá depois de core.GO_LIVE_ESCALONADO, sem nenhum
+        # plantão anterior em Região 3/4/5) - sistema único, não trava o relatório nesse caso.
+        tem_hist_escalonado = (
+            not niveis_escalonado_df.empty
+            and (niveis_escalonado_df["medico"] == nome_medico).any()
+        )
+        if tem_hist_escalonado:
+            st.info(
+                "Sem histórico no programa antigo pra esse médico — ele só tem plantões em "
+                "Região 1+2 (programa novo, ver bloco abaixo)."
+            )
+            renderizar_bloco_escalonado(nome_medico, mes_referencia)
+        else:
+            st.warning("Sem histórico pra esse médico.")
         return
 
     if mes_referencia in hist_rel["anomes"].values:
@@ -487,6 +577,11 @@ def renderizar_relatorio_medico(nome_medico, mes_referencia):
             mime="application/pdf", type="primary", key=f"pdf_{nome_medico}_{mes_referencia}",
         )
 
+    # Sistema único (pedido do usuário 2026-09-22): mostra o bloco do programa novo (Região 1+2)
+    # embaixo do relatório do programa antigo, sempre que o médico tiver histórico lá - fora das
+    # abas Sistema/Comunicado, visível nos dois casos, sem duplicar a lógica em cada aba.
+    renderizar_bloco_escalonado(nome_medico, mes_referencia)
+
 
 # ---------------------------------------------------------------- LOGIN
 if "usuario" not in st.session_state:
@@ -572,6 +667,12 @@ rampup_por_medico_mes = core.calcular_rampup_por_medico_mes(df_linhas, st.sessio
 niveis_df = niveis_df.merge(rampup_por_medico_mes, on=["medico", "anomes"], how="left")
 niveis_df["custo_rampup_mes"] = niveis_df["custo_rampup_mes"].fillna(0.0)
 niveis_df["valor_total_geral"] = niveis_df["valor_total_geral"] + niveis_df["custo_rampup_mes"]
+
+# PROGRAMA NOVO (Cenário Escalonado com Gatilho, Região 1+2) - mesmo sistema, mesma base
+# (df_linhas), só um cálculo em paralelo (ver core.montar_base_completa_dupla() e o comentário
+# "PROGRAMA NOVO" em core.py). Sistema único, pedido do usuário 2026-09-22: "eu queria um sistema
+# único, só isso, sendo que a base de análise é o BD de plantões médicos, tudo parte dali".
+niveis_escalonado_df = montar_niveis_escalonado_cached(df_linhas, core.LOGICA_NEGOCIO_VERSAO)
 
 meses_disponiveis = sorted(niveis_df["anomes"].unique())
 # "mes_atual" e a UNICA fonte de verdade do mes selecionado (mesmo key do widget). Os botoes
@@ -1886,6 +1987,57 @@ if linhas_selecionadas_medico:
     with st.container(border=True):
         st.markdown(f"### 📄 {medico_clicado}")
         renderizar_relatorio_medico(medico_clicado, mes_ref)
+
+# ------------------------------------------------- PROGRAMA NOVO (Cenário Escalonado, Região 1+2)
+# Sistema único (pedido do usuário 2026-09-22) - mesma Visão Geral, mesmo mês selecionado no
+# sidebar, mesma base (df_linhas/BD de Plantões) - só uma seção a mais pra não deixar os médicos
+# de Região 1+2 "escondidos" (só descobríveis digitando o nome em "Consultar médico específico").
+st.markdown("---")
+st.markdown(f"#### 🆕 Programa Novo — Região 1+2 ({mes_ref})")
+if mes_ref < core.GO_LIVE_ESCALONADO:
+    st.caption(
+        f"O programa novo só passa a valer a partir de {core.GO_LIVE_ESCALONADO} — em {mes_ref} "
+        "todas as operações (incl. Região 1+2) ainda estão 100% no programa antigo (acima)."
+    )
+else:
+    snap_esc = (
+        niveis_escalonado_df[niveis_escalonado_df["anomes"] == mes_ref]
+        if not niveis_escalonado_df.empty else niveis_escalonado_df
+    )
+    snap_esc = snap_esc[snap_esc["n_plantoes"] >= 1] if not snap_esc.empty else snap_esc
+    if snap_esc is None or snap_esc.empty:
+        st.caption("Nenhum plantão de Região 1+2 lançado nesse mês ainda.")
+    else:
+        ec1, ec2, ec3, ec4 = st.columns(4)
+        ec1.metric("Médicos ativos", len(snap_esc))
+        ec2.metric("Com prêmio (Nível 2+)", int((snap_esc["nivel_bruto"] >= 2).sum()))
+        ec3.metric("Prêmio do mês", fmt_brl(snap_esc["premio_mes"].sum()))
+        ec4.metric("Pacote total do mês", fmt_brl(snap_esc["pacote_total_mes"].sum()))
+        st.caption("Clique numa linha pra abrir o relatório completo do médico (mesmo relatório do programa antigo, com o bloco do programa novo embaixo).")
+        evento_tabela_esc = st.dataframe(
+            snap_esc[["medico", "n_plantoes", "n_fds_ou_noturno", "nivel_bruto", "taxa_plantao",
+                      "valor_repasse", "premio_mes", "pacote_total_mes"]]
+            .sort_values(["nivel_bruto", "n_plantoes"], ascending=[False, False])
+            .rename(columns={
+                "medico": "Médico", "n_plantoes": "Plantões", "n_fds_ou_noturno": "FDS+Noturno",
+                "nivel_bruto": "Nível", "taxa_plantao": "Taxa/plantão", "valor_repasse": "Valor Plantões",
+                "premio_mes": "Prêmio", "pacote_total_mes": "Pacote Total",
+            })
+            .style.format({"Taxa/plantão": fmt_brl, "Valor Plantões": fmt_brl, "Prêmio": fmt_brl,
+                            "Pacote Total": fmt_brl}),
+            use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row", key="tabela_medicos_escalonado_select",
+        )
+        linhas_sel_esc = evento_tabela_esc.selection.rows if evento_tabela_esc else []
+        if linhas_sel_esc:
+            medico_esc_clicado = (
+                snap_esc.sort_values(["nivel_bruto", "n_plantoes"], ascending=[False, False])
+                .iloc[linhas_sel_esc[0]]["medico"]
+            )
+            st.markdown("---")
+            with st.container(border=True):
+                st.markdown(f"### 📄 {medico_esc_clicado}")
+                renderizar_relatorio_medico(medico_esc_clicado, mes_ref)
 
 # ---------------------------------------------------------------- CONSULTA POR MÉDICO
 st.markdown("---")
