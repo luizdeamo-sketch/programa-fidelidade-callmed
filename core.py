@@ -137,6 +137,249 @@ CUSTO_RCP = 117.60  # Unimed Seguros: RCP 100k, franquia zero
 CUSTO_SEGURO_TOTAL_MES = CUSTO_SEGURO_VIDA_DIT_FUNERAL + CUSTO_RCP  # R$303,21
 
 
+# =============================================================================
+# PROGRAMA NOVO ("Cenário Escalonado com Gatilho") - vigente a partir de Out/2026, SÓ Região 1+2
+# =============================================================================
+# Adicionado 2026-09-22, a pedido do usuario ("vamos montar o programa todo inteiro... com essa
+# premissa que esta na planilha"). A planilha de referencia e `Callmed Premium - Niveis 1 a 4.xlsx`
+# (OneDrive, 1.ANALISES LUIZ), abas "Cenário Escalonado - Detalhe"/"Calculadora Escalonado"/
+# "Benefícios Não-Financeiros"/"Custo Benefícios - Set2026" - essa aba e o ESTUDO/premissa
+# aprovada, NAO deve ser alterada; este modulo e a IMPLEMENTACAO ao vivo dessa premissa.
+#
+# Decisao confirmada pelo usuario 2026-09-22 (as 3 perguntas feitas antes de comecar):
+# 1. Os dois programas coexistem: Regiao 1+2 usa a regra NOVA abaixo; Regiao 3+4+5 continua no
+#    programa ANTIGO (NIVEIS/calcular_niveis acima), sem nenhuma mudanca.
+# 2. Corte de vigencia = Out/2026 (GO_LIVE_ESCALONADO). Meses ate Set/2026 (inclusive) mostram o
+#    resultado do programa ANTIGO pra TODAS as operacoes, mesmo as de Regiao 1+2 (historico real,
+#    do jeito que foi pago) - a regra nova so vale pra frente, nao e retroativa.
+# 3. Beneficios nao-financeiros (convenio, seguros, TotalPass, DIT, funeral, curso, escala) entram
+#    junto com o financeiro, reaproveitando o mesmo mecanismo de carencia/streak ja existente
+#    (colchao de 1 mes incluido), so com os novos prazos (2/3/6/12 meses).
+GO_LIVE_ESCALONADO = "2026-10"
+
+# Regiao de cada operacao (df["operacao"] = setor_definido, ja corrigido pela Apoio - ver
+# enriquecer_plantoes()). Mapeamento CONFIRMADO pelo usuario em sessoes anteriores (nao
+# re-derivado de nome de hospital): ver [[project-callmed-premium-novo-programa]] (Regiao 1-5) e
+# [[project-bd-plantoes-fonte-verdade]] (HJSC = Regiao 2). Levantado 2026-09-22 direto da tabela
+# 'apoio' real (setor_definido distinto, especialidade=Anestesia) pra pegar a grafia EXATA usada
+# neste sistema - inclui as variantes "- Coordenação" e as sub-unidades do Salvalus (CO,
+# Hemodinamica, Oftalmologia, os 2 andares, Pre-Anestesico), que sao a mesma operacao/regiao pro
+# medico, so local/turno diferente. Operacao nao mapeada aqui (regiao_de() devolve None) fica de
+# fora do programa novo mesmo que caia em Out/2026+ - entra no programa antigo normalmente (mesmo
+# comportamento de hoje), nunca trava o sistema.
+REGIAO_SETOR = {
+    # Região 1 (ABC Paulista)
+    "HSB Anestesia": 1, "HSB Anestesia - Coordenação": 1, "HSB Anestesia  - Coordenação": 1,
+    "Notre Anestesia": 1, "Notre Anestesia - Coordenação": 1,
+    "Mário Covas Anestesia": 1,
+    "Hospital Santa Helena": 1, "Hospital Santa Helena SADT": 1,
+    # Região 2 (São Paulo Capital)
+    "Vitória Anestesia": 2,
+    "Salvalus Anestesia Unidade Avançada": 2, "Salvalus Anestesia Unidade Avançada - Coordenação": 2,
+    "Salvalus Anestesia 11 Andar": 2, "Salvalus Anestesia 3 Andar": 2,
+    "Salvalus Anestesia Pré-Anestésico": 2, "Salvalus CO": 2, "Salvalus CO - Coordenação": 2,
+    "Salvalus Hemodinâmica": 2, "Salvalus Hemodinâmica - Coordenação": 2, "Salvalus Oftalmologia": 2,
+    "HJSC Anestesia": 2,
+    # Região 3 (Baixada Santista) - programa ANTIGO
+    "Ana Costa Anestesia": 3, "Ana Costa Anestesia - Coordenação": 3,
+    "Santa Saúde Anestesia": 3,
+    # Região 4 (Arujá/Mogi) - programa ANTIGO
+    "Aruja Anestesia": 4, "Mogi Anestesia": 4,
+    # Região 5 (Interior/Sorocaba) - programa ANTIGO (tambem fora de EXCLUSAO_HOSPITAL_REGEX aqui
+    # de proposito - a exclusao do Amhemed no programa antigo e sobre HOSPITAL, essa lista aqui e
+    # so informativa/regional, nao muda quem conta ou nao)
+    "Amhemed": 5,
+}
+REGIOES_ESCALONADO = {1, 2}  # so essas entram no programa novo
+
+
+def regiao_de(operacao):
+    """Regiao (1-5) de uma operacao (df['operacao'], ja resolvida pela Apoio) - None se a
+    operacao nao estiver mapeada (fica no programa antigo por padrao, nunca quebra)."""
+    return REGIAO_SETOR.get(operacao)
+
+
+# min_fds = minimo de noturno/fds (mesma uniao FDS+Noturno de sempre) DENTRO da quantidade do mes -
+# gatilho DUPLO: so sobe de nivel se bater os dois ao mesmo tempo (mesma mecanica de _nivel_bruto()
+# ja usada pelo programa antigo, reaproveitada aqui). 'taxa' = R$/plantao daquele nivel (substitui
+# o pct_aumento do programa antigo) - TODOS os plantoes do medico-mes na Regiao 1+2 sao pagos ao
+# preco real deles (valor_repasse, sem mudar) MAIS um PREMIO de (taxa_nivel - taxa_basal) por
+# plantao (delta) - o R$2.000 basal e so referencia ilustrativa pra calcular o delta, nunca um
+# preco minimo real cobrado do hospital (nota da propria planilha, aba "Cenário Escalonado -
+# Detalhe"). carencia_meses aqui e pro mesmo mecanismo de streak/colchao do programa antigo, com
+# os prazos NOVOS (2/3/6/12 - aba "Benefícios Não-Financeiros").
+NIVEIS_ESCALONADO = [
+    {"idx": 1, "nome": "Nível 1", "min_plantoes": 0, "max_plantoes": 14, "min_fds": 0,
+     "carencia_meses": 0, "taxa": 2000},
+    {"idx": 2, "nome": "Nível 2", "min_plantoes": 15, "max_plantoes": 19, "min_fds": 3,
+     "carencia_meses": 2, "taxa": 2050},
+    {"idx": 3, "nome": "Nível 3", "min_plantoes": 20, "max_plantoes": 24, "min_fds": 5,
+     "carencia_meses": 3, "taxa": 2100},
+    {"idx": 4, "nome": "Nível 4", "min_plantoes": 25, "max_plantoes": 29, "min_fds": 7,
+     "carencia_meses": 6, "taxa": 2150},
+    {"idx": 5, "nome": "Nível 5", "min_plantoes": 30, "max_plantoes": None, "min_fds": 9,
+     "carencia_meses": 12, "taxa": 2200},
+]
+NIVEL_ESCALONADO_POR_IDX = {n["idx"]: n for n in NIVEIS_ESCALONADO}
+TAXA_BASAL_ESCALONADO = NIVEIS_ESCALONADO[0]["taxa"]
+
+# Beneficios nao-financeiros por nivel (aba "Benefícios Não-Financeiros" da planilha, 2026-09-21).
+# "sempre" = a partir do Nivel 1, sem carencia (suporte, antecipacao, juridico, TotalPass
+# academia/nutri/psico). Os demais so valem quando o STREAK (meses seguidos, com o colchao de
+# MESES_TOLERANCIA_QUEDA_BENEFICIOS) bate a carencia_meses do nivel em NIVEIS_ESCALONADO.
+BENEFICIOS_SEMPRE = [
+    "Suporte administrativo prioritário", "Antecipação de valores",
+    "Apoio jurídico integral (preventivo/administrativo)",
+    "Academia, nutricionista e psicologia — TotalPass",
+]
+BENEFICIOS_ESCALONADO_NIVEL = {
+    2: ["Convênio médico", "Seguro de vida — R$100.000", "Seguro RC — R$100.000",
+        "DIT — R$167/dia", "Assistência funeral — R$10.000", "Desconto de 20% em 1 curso/ano"],
+    3: ["Escala preferencial em unidades", "Desconto de 40% em 1 curso/ano"],
+    4: ["Desconto de 60% em 1 curso/ano"],
+    5: ["Seguro de vida — R$200.000 (dobrado)", "Seguro RC — R$200.000 (dobrado)",
+        "DIT — R$334/dia (dobrado)", "Desconto de 80% em 1 curso/ano"],
+}
+# Custos reais dos beneficios (aba "Custo Benefícios - Set2026", DADO REAL passado pelo usuário):
+# Seguro RC R$100/médico/mês (N2-N4) ou R$200 (N5); Seguro de vida+DIT+funeral R$180/médico/mês
+# (N2-N4) ou R$360 (N5); TotalPass ~R$5.000/mês FLAT (contrato corporativo, nao escala por medico -
+# soma-se 1x, nao por medico). Convênio médico: SEM custo direto pra CallMed (so acesso).
+CUSTO_SEGURO_RC_ESCALONADO = {2: 100.0, 3: 100.0, 4: 100.0, 5: 200.0}
+CUSTO_SEGURO_VIDA_ESCALONADO = {2: 180.0, 3: 180.0, 4: 180.0, 5: 360.0}
+CUSTO_TOTALPASS_FLAT_MES = 5000.0  # 1x/mes, independente de quantos medicos - nao multiplicar
+
+
+def _nivel_bruto_escalonado(n_plantoes, n_fds_ou_noturno, niveis=None):
+    """Mesmo gatilho duplo do programa antigo (_nivel_bruto) - quantidade E noturno/fds, os dois
+    ao mesmo tempo; se bate a quantidade mas nao o gatilho de noturno/fds, fica no nivel mais alto
+    onde os dois se cumprem (nao pula nivel so pela quantidade)."""
+    return _nivel_bruto(n_plantoes, n_fds_ou_noturno, niveis or NIVEIS_ESCALONADO)
+
+
+def calcular_niveis_escalonado(agg, niveis=None):
+    """Gemeo de calcular_niveis(), generalizado pra N niveis (aqui, 5) e pagamento por TAXA FIXA
+    por plantao (delta sobre o basal) em vez de percentual sobre valor_repasse. Mesmo mecanismo de
+    streak/colchao (MESES_TOLERANCIA_QUEDA_BENEFICIOS) pros beneficios; aqui NAO existe separacao
+    nivel_bruto (pagamento) vs nivel_vestido (beneficios) tipo o programa antigo - o pagamento
+    (premio) tambem e por nivel_bruto/imediato (mesma logica: o medico recebe pelo volume real do
+    mes, sem esperar carencia), so os BENEFICIOS NAO-FINANCEIROS (lista BENEFICIOS_ESCALONADO_NIVEL)
+    esperam a carencia (nivel_vestido). Nao reaproveita 'teve_coordenacao'/gestor automatico do
+    programa antigo - a planilha de referencia nao definiu essa regra pro programa novo; se
+    aparecer coordenador/gestor de Regiao 1+2, ele entra pelo volume real dele, sem atalho (marcar
+    como pendencia se o usuario quiser adicionar essa regra depois)."""
+    niveis = sorted(niveis or NIVEIS_ESCALONADO, key=lambda n: n["idx"])
+    nivel_por_idx = {n["idx"]: n for n in niveis}
+    idxs = [n["idx"] for n in niveis if n["idx"] > 1]  # niveis com carencia/beneficio (2..N)
+    if agg.empty:
+        return pd.DataFrame()
+    meses_todos = sorted(agg["anomes"].unique())
+    mes_para_indice = {m: i for i, m in enumerate(meses_todos)}
+
+    resultados = []
+    for medico, grp in agg.groupby("medico"):
+        grp = grp.set_index("anomes")
+        primeiro_idx = min(mes_para_indice[m] for m in grp.index)
+        ultimo_idx = mes_para_indice[meses_todos[-1]]
+        streaks = {i: 0 for i in idxs}
+        meses_abaixo_seguidos = {i: 0 for i in idxs}
+        for i in range(primeiro_idx, ultimo_idx + 1):
+            am = meses_todos[i]
+            if am in grp.index:
+                row = grp.loc[am]
+                n_plantoes = int(row["n_plantoes"])
+                n_fds_ou_noturno = int(row["n_fds_ou_noturno"])
+                n_plantoes_beneficios = int(row.get("n_plantoes_beneficios", 0))
+                n_fds_ou_noturno_beneficios = int(row.get("n_fds_ou_noturno_beneficios", 0))
+                valor_repasse = float(row["valor_repasse"])
+            else:
+                n_plantoes, n_fds_ou_noturno = 0, 0
+                n_plantoes_beneficios, n_fds_ou_noturno_beneficios = 0, 0
+                valor_repasse = 0.0
+
+            nivel_bruto = _nivel_bruto_escalonado(n_plantoes, n_fds_ou_noturno, niveis)
+            nivel_bruto_beneficios = _nivel_bruto_escalonado(
+                n_plantoes_beneficios, n_fds_ou_noturno_beneficios, niveis
+            )
+
+            for nivel_check in idxs:
+                if nivel_bruto_beneficios >= nivel_check:
+                    streaks[nivel_check] += 1
+                    meses_abaixo_seguidos[nivel_check] = 0
+                else:
+                    meses_abaixo_seguidos[nivel_check] += 1
+                    if meses_abaixo_seguidos[nivel_check] > MESES_TOLERANCIA_QUEDA_BENEFICIOS:
+                        streaks[nivel_check] = 0
+
+            nivel_vestido = 1
+            for nivel_check in idxs:
+                carencia = nivel_por_idx[nivel_check]["carencia_meses"]
+                if streaks[nivel_check] >= carencia + 1:
+                    nivel_vestido = nivel_check
+
+            info_bruto = nivel_por_idx[nivel_bruto]
+            taxa_basal = nivel_por_idx[1]["taxa"]
+            delta_plantao = info_bruto["taxa"] - taxa_basal
+            premio_mes = n_plantoes * delta_plantao
+            pacote_total_mes = valor_repasse + premio_mes
+            custo_seguro_rc = CUSTO_SEGURO_RC_ESCALONADO.get(nivel_vestido, 0.0)
+            custo_seguro_vida = CUSTO_SEGURO_VIDA_ESCALONADO.get(nivel_vestido, 0.0)
+
+            resultados.append({
+                "medico": medico, "anomes": am,
+                "n_plantoes": n_plantoes, "n_fds_ou_noturno": n_fds_ou_noturno,
+                "valor_repasse": valor_repasse,
+                "nivel_bruto": nivel_bruto, "nivel_vestido": nivel_vestido,
+                "taxa_plantao": info_bruto["taxa"], "delta_plantao": delta_plantao,
+                "premio_mes": premio_mes, "pacote_total_mes": pacote_total_mes,
+                "streak_nivel_bruto": streaks[nivel_bruto] if nivel_bruto >= 2 else None,
+                **{f"streak_n{i}": streaks[i] for i in idxs},
+                **{f"meses_abaixo_n{i}": meses_abaixo_seguidos[i] for i in idxs},
+                "beneficios_ativos": (
+                    list(BENEFICIOS_SEMPRE)
+                    + [b for nv in idxs if nv <= nivel_vestido for b in BENEFICIOS_ESCALONADO_NIVEL.get(nv, [])]
+                ),
+                "custo_seguro_rc_mes": custo_seguro_rc, "custo_seguro_vida_mes": custo_seguro_vida,
+            })
+    return pd.DataFrame(resultados)
+
+
+def montar_base_completa_dupla(arquivo=None, niveis_antigo=None, niveis_escalonado=None,
+                                medicos_gestores=None, custo_seguro_mes=None):
+    """Pipeline completo dos DOIS programas ao mesmo tempo (decisao do usuario 2026-09-22:
+    coexistem, nunca um substitui o outro). Devolve (niveis_df, niveis_escalonado_df):
+    - niveis_df: programa ANTIGO (NIVEIS/calcular_niveis, sem nenhuma mudanca) - Regiao 3+4+5
+      sempre, MAIS Regiao 1+2 nos meses ate Set/2026 (o programa novo so vale a partir de
+      GO_LIVE_ESCALONADO), MAIS qualquer operacao fora do mapeamento REGIAO_SETOR (protecao contra
+      operacao nova ainda nao classificada).
+    - niveis_escalonado_df: programa NOVO (NIVEIS_ESCALONADO/calcular_niveis_escalonado) - so
+      Regiao 1+2, so a partir de GO_LIVE_ESCALONADO.
+    A DIVISAO usa exatamente a mesma base enriquecida (mesmo conta_pro_nivel/conta_pro_beneficios
+    de sempre) - so filtra QUAL SUBCONJUNTO de linhas alimenta cada agregacao, sem duplicar
+    nenhuma linha entre os dois programas (regiao+mes determina um dos dois exclusivamente)."""
+    df_linhas = carregar_plantoes(arquivo)
+    if df_linhas.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    df_linhas = df_linhas.copy()
+    df_linhas["regiao"] = df_linhas["operacao"].map(REGIAO_SETOR)
+    eh_regiao_nova = df_linhas["regiao"].isin(REGIOES_ESCALONADO)
+    eh_mes_novo = df_linhas["anomes"] >= GO_LIVE_ESCALONADO
+    # escopo de hospital do lado ANTIGO usa as colunas de sempre (conta_pro_nivel/beneficios, com
+    # EXCLUSAO_HOSPITAL_REGEX); o lado NOVO usa conta_pro_nivel_novo/beneficios_novo (sem essa
+    # exclusao - ver comentario em enriquecer_plantoes()). Um mes/regiao so alimenta UM dos dois.
+    agg_antigo = agregar_mensal(df_linhas[~(eh_regiao_nova & eh_mes_novo)])
+    agg_novo = agregar_mensal(
+        df_linhas[eh_regiao_nova & eh_mes_novo],
+        col_nivel="conta_pro_nivel_novo", col_beneficios="conta_pro_beneficios_novo",
+    )
+    niveis_df = calcular_niveis(
+        agg_antigo, niveis=niveis_antigo, medicos_gestores=medicos_gestores,
+        custo_seguro_mes=custo_seguro_mes,
+    )
+    niveis_escalonado_df = calcular_niveis_escalonado(agg_novo, niveis=niveis_escalonado)
+    return niveis_df, niveis_escalonado_df
+
+
+
 def _nivel_bruto(n_plantoes, n_fds, niveis=None):
     """Nivel que o volume/fds do mes sustenta, sem considerar carencia nem coordenacao."""
     niveis = niveis or NIVEIS
@@ -515,6 +758,22 @@ def enriquecer_plantoes(df, apoio_df=None, arquivo=None):
         & (~df["eh_tipo_nao_clinico"])
     )
     df["conta_pro_nivel"] = df["conta_pro_beneficios"] & (~df["eh_apenas_beneficios"])
+
+    # PROGRAMA NOVO (escalonado, Regiao 1+2 - ver bloco "PROGRAMA NOVO" acima) tem escopo de
+    # hospital PROPRIO, diferente do programa antigo: nao aplica EXCLUSAO_HOSPITAL_REGEX
+    # ("covas|amhemed") - essa exclusao e uma decisao de escopo do programa ANTIGO especificamente
+    # ("sem canal de premio hoje" NESSE programa - ver [[project-callmed-premium-novo-programa]]),
+    # mas o estudo do programa novo (planilha "Callmed Premium - Niveis 1 a 4.xlsx", aba
+    # "Capacidade Máxima por operação") inclui explicitamente o Hospital Estadual Mário Covas
+    # (Regiao 1) com numeros reais - achado 2026-09-22, ao tentar bater esta implementacao contra
+    # a tabela retroativa da planilha: usando conta_pro_nivel (com a exclusao antiga) o total
+    # mensal nao batia com a planilha; removendo so a exclusao de hospital pro programa novo ficou
+    # mais proximo (nao bateu 100% ao centavo - a planilha e um script auxiliar de outra sessao,
+    # metodologia exata nao documentada - mas o principio de escopo, Covas dentro, esta confirmado
+    # pela propria planilha). Se precisar excluir Covas/Amhemed do programa novo tambem, isso e uma
+    # decisao de negocio nova, nao herdada do programa antigo - perguntar antes de mudar.
+    df["conta_pro_beneficios_novo"] = df["eh_anestesia"] & (~df["eh_gestao"]) & (~df["eh_tipo_nao_clinico"])
+    df["conta_pro_nivel_novo"] = df["conta_pro_beneficios_novo"] & (~df["eh_apenas_beneficios"])
     return df
 
 
@@ -863,7 +1122,7 @@ def aplicar_operacoes_customizadas(df, operacoes_excluidas):
     return df
 
 
-def agregar_mensal(df):
+def agregar_mensal(df, col_nivel="conta_pro_nivel", col_beneficios="conta_pro_beneficios"):
     """Agrega linha-a-linha em (medico, anomes) -> n_plantoes validos, n_fds (Sab/Dom) validos,
     n_noturno validos, n_fds_ou_noturno (uniao, base da exigencia de nivel), se teve pagamento de
     coordenacao/gestao naquele mes (mesmo fora do escopo de hospital - coordenacao e coordenacao
@@ -879,7 +1138,7 @@ def agregar_mensal(df):
                        "teve_coordenacao", "valor_repasse"]
     if df.empty:
         return pd.DataFrame(columns=colunas_vazias)
-    validos = df[df["conta_pro_nivel"]]
+    validos = df[df[col_nivel]]
     agg = validos.groupby(["medico", "anomes"]).agg(
         n_plantoes=("valor", "count"),
         n_fds=("eh_fds", "sum"),
@@ -888,7 +1147,7 @@ def agregar_mensal(df):
         valor_repasse=("valor", "sum"),
     ).reset_index()
 
-    validos_beneficios = df[df["conta_pro_beneficios"]]
+    validos_beneficios = df[df[col_beneficios]]
     agg_beneficios = validos_beneficios.groupby(["medico", "anomes"]).agg(
         n_plantoes_beneficios=("valor", "count"),
         n_fds_ou_noturno_beneficios=("eh_fds_ou_noturno", "sum"),
